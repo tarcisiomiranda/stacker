@@ -1,0 +1,17 @@
+# Build artifacts
+/bin/
+/devtui
+*.test
+*.out
+*.prof
+*.pprof
+
+# Local mise overrides
+.mise.local.toml
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*~
+

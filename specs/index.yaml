@@ -1,0 +1,6 @@
+last_updated: 2026-07-17
+
+domains:
+  - name: processes
+    description: Process configuration, lifecycle supervision, log capture, and terminal UI.
+    path: specs/processes.yaml

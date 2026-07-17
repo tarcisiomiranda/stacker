@@ -1,0 +1,25 @@
+version: 1
+
+ui:
+  wheel_lines: 3
+  copy_on_release: true
+  max_log_lines: 10000
+
+processes:
+  backend:
+    command: mise run back
+    cwd: .
+    autostart: false
+    graceful_timeout: 8s
+
+  frontend:
+    command: mise run front
+    cwd: .
+    autostart: false
+    graceful_timeout: 8s
+
+  demo:
+    command: 'i=1; while true; do echo "demo log $i - $(date +%T)"; i=$((i+1)); sleep 1; done'
+    cwd: .
+    autostart: true
+    graceful_timeout: 3s

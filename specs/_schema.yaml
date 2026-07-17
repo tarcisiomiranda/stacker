@@ -1,0 +1,36 @@
+last_updated: YYYY-MM-DD
+
+domain: domain_name
+description: Short description of the business domain.
+
+models:
+  - name: ModelName
+    path: path/to/model
+
+graphql:
+  queries:
+    - name: queryName
+      path: path/to/query
+  mutations:
+    - name: mutationName
+      path: path/to/mutation
+
+rest:
+  endpoints:
+    - method: GET
+      route: /resource
+      path: path/to/handler
+
+frontend:
+  pages:
+    - name: PageName
+      path: path/to/page
+  hooks:
+    - name: useHookName
+      path: path/to/hook
+  components:
+    - name: ComponentName
+      path: path/to/component
+  types:
+    - name: TypeName
+      path: path/to/type

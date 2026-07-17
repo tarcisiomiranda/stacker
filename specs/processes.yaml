@@ -1,0 +1,33 @@
+last_updated: 2026-07-17
+
+domain: processes
+description: Process configuration, lifecycle supervision, log capture, and terminal UI.
+
+models:
+  - name: Config
+    path: cmd/devtui/main.go
+  - name: UIConfig
+    path: cmd/devtui/main.go
+  - name: ProcessConfig
+    path: cmd/devtui/main.go
+  - name: ProcessStatus
+    path: cmd/devtui/main.go
+  - name: Process
+    path: cmd/devtui/main.go
+
+graphql:
+  queries: []
+  mutations: []
+
+rest:
+  endpoints: []
+
+frontend:
+  pages: []
+  hooks: []
+  components:
+    - name: Process list panel
+      path: cmd/devtui/main.go
+    - name: Log panel
+      path: cmd/devtui/main.go
+  types: []
