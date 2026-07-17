@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestProcessKeepsOnlyConfiguredNumberOfLogs(t *testing.T) {
@@ -44,6 +45,45 @@ func TestProcessListRowsFitPanel(t *testing.T) {
 	for _, line := range strings.Split(m.processList(), "\n") {
 		if width := lipgloss.Width(line); width > maxWidth {
 			t.Fatalf("line width %d exceeds panel content width %d: %q", width, maxWidth, line)
+		}
+	}
+}
+
+func TestCaptureSanitizesTerminalControlSequences(t *testing.T) {
+	p := NewProcess("test", ProcessConfig{}, 10)
+	p.capture(strings.NewReader("\x1b[31mINFO\x1b[0m\trequest\rrewrite\a\n"), "stderr", func() {})
+
+	logs := p.Logs()
+	if len(logs) != 1 {
+		t.Fatalf("expected one log line, got %#v", logs)
+	}
+	if strings.ContainsAny(logs[0], "\x1b\t\r\a") {
+		t.Fatalf("log still contains terminal control characters: %q", logs[0])
+	}
+	if logs[0] != "[stderr] INFO    request rewrite " {
+		t.Fatalf("unexpected sanitized log: %q", logs[0])
+	}
+}
+
+func TestLogViewLinesStayWithinPanelWidth(t *testing.T) {
+	m := newModel(Config{Processes: map[string]ProcessConfig{
+		"demo": {Command: "true"},
+	}})
+	m.width = 100
+	m.height = 20
+	for range 100 {
+		m.current().appendLog(sanitizeLogLine("\x1b[34mINFO\x1b[0m\t" + strings.Repeat("界", 100)))
+	}
+	m.scrollToBottom()
+
+	maxWidth := m.width - m.leftWidth() - 6
+	lines := strings.Split(m.logView(), "\n")
+	if len(lines) > m.logHeight() {
+		t.Fatalf("log view height %d exceeds available height %d", len(lines), m.logHeight())
+	}
+	for _, line := range lines {
+		if width := ansi.StringWidth(line); width > maxWidth {
+			t.Fatalf("line width %d exceeds panel width %d: %q", width, maxWidth, line)
 		}
 	}
 }

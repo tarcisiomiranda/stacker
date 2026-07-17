@@ -18,9 +18,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -193,7 +195,7 @@ func (p *Process) capture(r io.Reader, stream string, notify func()) {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
-		p.appendLog(fmt.Sprintf("[%s] %s", stream, scanner.Text()))
+		p.appendLog(fmt.Sprintf("[%s] %s", stream, sanitizeLogLine(scanner.Text())))
 		notify()
 	}
 	if err := scanner.Err(); err != nil {
@@ -483,6 +485,7 @@ func (m *model) processList() string {
 	for i, p := range m.processes {
 		processStatus := p.Status()
 		status := string(processStatus)
+		name := sanitizeLogLine(p.Name)
 		statusRendered := status
 		if processStatus == StatusRunning {
 			statusRendered = runningStyle.Render(status)
@@ -491,7 +494,8 @@ func (m *model) processList() string {
 		}
 		contentWidth := max(1, m.leftWidth()-5)
 		nameWidth := max(1, contentWidth-len(status)-1)
-		line := fmt.Sprintf("%-*s %s", nameWidth, truncate(p.Name, nameWidth), statusRendered)
+		name = truncate(name, nameWidth)
+		line := name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
 		if i == m.selected {
 			line = selectedProcessStyle.Render(line)
 		}
@@ -515,7 +519,7 @@ func (m *model) logView() string {
 	end := min(len(logs), m.logOffset+visibleLines)
 
 	var b strings.Builder
-	title := fmt.Sprintf("Logs: %s [%s]", p.Name, p.Status())
+	title := fmt.Sprintf("Logs: %s [%s]", sanitizeLogLine(p.Name), p.Status())
 	if !m.follow {
 		title += " — paused; press G for bottom"
 	}
@@ -783,12 +787,22 @@ func truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= width {
-		return s
+	return ansi.Truncate(s, width, "…")
+}
+
+func sanitizeLogLine(line string) string {
+	line = ansi.Strip(line)
+	var b strings.Builder
+	b.Grow(len(line))
+	for _, r := range line {
+		switch {
+		case r == '\t':
+			b.WriteString("    ")
+		case unicode.IsControl(r):
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
 	}
-	if width == 1 {
-		return "…"
-	}
-	return string(r[:width-1]) + "…"
+	return b.String()
 }
