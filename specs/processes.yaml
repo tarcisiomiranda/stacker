@@ -5,15 +5,15 @@ description: Process configuration, lifecycle supervision, log capture, and term
 
 models:
   - name: Config
-    path: cmd/devtui/main.go
+    path: cmd/stacker/main.go
   - name: UIConfig
-    path: cmd/devtui/main.go
+    path: cmd/stacker/main.go
   - name: ProcessConfig
-    path: cmd/devtui/main.go
+    path: cmd/stacker/main.go
   - name: ProcessStatus
-    path: cmd/devtui/main.go
+    path: cmd/stacker/main.go
   - name: Process
-    path: cmd/devtui/main.go
+    path: cmd/stacker/main.go
 
 graphql:
   queries: []
@@ -27,7 +27,7 @@ frontend:
   hooks: []
   components:
     - name: Process list panel
-      path: cmd/devtui/main.go
+      path: cmd/stacker/main.go
     - name: Log panel
-      path: cmd/devtui/main.go
+      path: cmd/stacker/main.go
   types: []

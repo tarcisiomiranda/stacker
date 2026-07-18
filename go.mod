@@ -1,4 +1,4 @@
-module github.com/tarcisiomiranda/devtui-demo
+module github.com/tarcisiomiranda/stacker
 
 go 1.24.0
 

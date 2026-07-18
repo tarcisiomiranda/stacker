@@ -1,6 +1,8 @@
 # Build artifacts
 /bin/
-/devtui
+/stacker
+/dist/
+/release/
 *.test
 *.out
 *.prof
@@ -9,9 +11,13 @@
 # Local mise overrides
 .mise.local.toml
 
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+
 # Editors and operating systems
 .DS_Store
 .idea/
 .vscode/
 *~
-

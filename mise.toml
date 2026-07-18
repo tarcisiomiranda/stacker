@@ -2,25 +2,27 @@ min_version = "2026.7.0"
 
 [tools]
 go = "1.24"
+python = "3.13"
+shellcheck = "0.11"
 
 [tasks.setup]
 description = "Install Go dependencies"
 run = "go mod tidy"
 
 [tasks.dev]
-description = "Run the TUI using devtui.yml"
+description = "Run Stacker using stacker.yml"
 depends = ["setup"]
-run = "go run ./cmd/devtui -config devtui.yml"
+run = "go run ./cmd/stacker -config stacker.yml"
 
 [tasks.build]
 description = "Build the local binary"
 depends = ["setup"]
-run = "mkdir -p bin && go build -trimpath -ldflags='-s -w' -o bin/devtui ./cmd/devtui"
+run = "mkdir -p bin && go build -trimpath -ldflags='-s -w' -o bin/stacker ./cmd/stacker"
 
 [tasks.install]
-description = "Install devtui into GOBIN or GOPATH/bin"
+description = "Install Stacker into GOBIN or GOPATH/bin"
 depends = ["setup"]
-run = "go install ./cmd/devtui"
+run = "go install ./cmd/stacker"
 
 [tasks.test]
 description = "Run tests"
@@ -28,4 +30,16 @@ run = "go test ./..."
 
 [tasks.clean]
 description = "Remove generated binaries"
-run = "rm -rf bin"
+run = "rm -rf bin dist release"
+
+[tasks."release:check"]
+description = "Validate the GitHub release script"
+run = "python -m py_compile .github/scripts/release.py .github/scripts/test_release.py && python -m unittest discover -s .github/scripts -p 'test_*.py' && python .github/scripts/release.py --validate-tag v0.0.0"
+
+[tasks."lint:shell"]
+description = "Lint shell scripts"
+run = "shellcheck install.sh scripts/*.sh"
+
+[tasks."test:installer"]
+description = "Test the release installer without network access"
+run = "scripts/test-installer.sh"

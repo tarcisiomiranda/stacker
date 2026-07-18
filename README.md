@@ -1,57 +1,94 @@
-# devtui demo
+# Stacker
 
-Protótipo de supervisor de processos em Go com:
+Terminal process supervisor written in Go and configured with YAML.
 
-- processos definidos em YAML;
-- start, stop e restart graceful;
-- stdout e stderr no painel de logs;
-- scroll pela roda do mouse;
-- seleção de linhas por arraste;
-- cópia automática via OSC 52 ao soltar o mouse;
-- build e instalação por `mise`.
+- processes defined in YAML;
+- graceful start, stop, and restart;
+- separate stdout and stderr capture;
+- scrollable logs with a configurable memory limit;
+- drag selection and copying through OSC 52;
+- termination of the entire process group on Linux and macOS.
 
-## Executar
+## Quick installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/install.sh | bash
+```
+
+The installer detects the operating system and architecture, downloads the latest release, and verifies its SHA-256 checksum. When run as `root`, it installs Stacker in `/usr/local/bin`. For other users, it falls back to `~/.local/bin` when `/usr/local/bin` is not writable.
+
+To choose an installation directory or a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/install.sh \
+  | STACKER_INSTALL_DIR="$HOME/.local/bin" STACKER_VERSION=v0.1.0 bash
+```
+
+## Run
+
+```bash
+stacker -config stacker.yml
+```
+
+Without `-config`, Stacker looks for `stacker.yml` in the current directory.
+
+Relative `cwd` paths are resolved from the directory containing the configuration file. Unknown YAML fields, empty commands, missing directories, and invalid timeouts are rejected before the TUI opens.
+
+Each command inherits the environment, including `PATH`, from the user who started Stacker and runs through `/bin/sh -c`. If `mise` already works in the current terminal, use `command: mise run task-name`; there is no need to export paths or activate `mise` inside the YAML file.
+
+## Development
 
 ```bash
 mise install
 mise run dev
 ```
 
-O processo `demo` inicia automaticamente para você testar os logs sem configurar outro projeto.
+The `demo` process starts automatically so you can test log handling without configuring another project.
 
-Os caminhos `cwd` relativos são resolvidos a partir do diretório do arquivo de configuração. Campos YAML desconhecidos, comandos vazios, diretórios inexistentes e timeouts inválidos são rejeitados antes da abertura da TUI.
-
-## Build
+## Local build
 
 ```bash
 mise run build
-./bin/devtui -config devtui.yml
+./bin/stacker -config stacker.yml
 ```
 
-## Instalar o binário
+## Install from source
 
 ```bash
 mise run install
 ```
 
-O `go install` grava o binário em `$GOBIN` ou, quando ele não estiver configurado, em `$(go env GOPATH)/bin`.
+`go install` writes the binary to `$GOBIN` or, when it is not configured, to `$(go env GOPATH)/bin`.
 
-## Controles
+## Releases
 
-- `↑/↓` ou `j/k`: selecionar processo
-- `Enter`: iniciar
-- `s`: parar
-- `r`: reiniciar
-- roda do mouse: navegar nos logs
-- arrastar botão esquerdo: selecionar linhas
-- soltar botão esquerdo: copiar seleção
-- `G` ou `End`: retornar ao final
-- `Esc`: limpar seleção
-- `q`: encerrar
+The `.github/workflows/release.yml` workflow publishes releases for SemVer tags. It runs tests and `go vet`, builds CGO-disabled binaries for Linux and macOS on AMD64 and ARM64, generates `checksums.txt`, and attaches all artifacts to the GitHub Release.
 
-## Limitações deste primeiro protótipo
+To publish a version:
 
-- execução usa `sh -lc`, portanto o protótipo é voltado inicialmente para Linux/macOS;
-- a seleção é por linhas inteiras, não por coluna;
-- OSC 52 depende de suporte e configuração do terminal;
-- ainda não existe health check ou dependência entre processos.
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+You can also start the workflow manually from the Actions tab and provide the desired tag. The pipeline does not create commits or modify the `main` branch.
+
+## Controls
+
+- `↑/↓` or `j/k`: select a process
+- `Enter`: start
+- `s`: stop
+- `r`: restart
+- mouse wheel: scroll through logs
+- drag with the left mouse button: select lines
+- release the left mouse button: copy the selection
+- `G` or `End`: return to the bottom
+- `Esc`: clear the selection
+- `q`: quit
+
+## Current limitations
+
+- commands run through `/bin/sh -c`, so Stacker currently targets Linux and macOS;
+- selection operates on entire lines, not individual columns;
+- OSC 52 depends on terminal support and configuration;
+- process health checks and dependencies are not supported yet.

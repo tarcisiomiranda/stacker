@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "SemVer tag to create, for example v1.2.3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install tools
+        uses: jdx/mise-action@v4
+        with:
+          install_args: "go python shellcheck"
+          cache: true
+
+      - name: Test release publisher
+        run: mise run release:check
+
+      - name: Validate release tag
+        run: mise exec -- python .github/scripts/release.py --validate-tag "$RELEASE_TAG"
+
+      - name: Run tests
+        run: mise run test
+
+      - name: Run go vet
+        run: mise exec -- go vet ./...
+
+      - name: Lint shell scripts
+        run: mise run lint:shell
+
+      - name: Test installer
+        run: mise run test:installer
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Go
+        uses: jdx/mise-action@v4
+        with:
+          install_args: go
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          mise exec -- go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o "dist/stacker-${GOOS}-${GOARCH}" \
+            ./cmd/stacker
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: stacker-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/stacker-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Python
+        uses: jdx/mise-action@v4
+        with:
+          install_args: python
+          cache: true
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: stacker-*
+          merge-multiple: true
+          path: release
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum stacker-* > checksums.txt
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: mise exec -- python .github/scripts/release.py
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Release ${RELEASE_TAG}"
+            echo
+            echo "Published binaries:"
+            for file in release/stacker-*; do
+              echo "- $(basename "$file")"
+            done
+            echo "- checksums.txt"
+          } >> "$GITHUB_STEP_SUMMARY"

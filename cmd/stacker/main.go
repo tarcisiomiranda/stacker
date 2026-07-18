@@ -124,8 +124,9 @@ func (p *Process) Start(notify func()) error {
 		return err
 	}
 
-	cmd := exec.Command("sh", "-lc", p.Config.Command)
+	cmd := exec.Command("/bin/sh", "-c", p.Config.Command)
 	cmd.Dir = absCwd
+	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
@@ -155,7 +156,7 @@ func (p *Process) Start(notify func()) error {
 	p.done = done
 	p.status = StatusRunning
 	p.mu.Unlock()
-	p.appendLog(fmt.Sprintf("[devtui] started pid=%d", cmd.Process.Pid))
+	p.appendLog(fmt.Sprintf("[stacker] started pid=%d", cmd.Process.Pid))
 	notify()
 
 	go p.capture(stdout, "stdout", notify)
@@ -173,9 +174,9 @@ func (p *Process) Start(notify func()) error {
 			}
 		}
 		if err != nil {
-			p.appendLogLocked("[devtui] exited: " + err.Error())
+			p.appendLogLocked("[stacker] exited: " + err.Error())
 		} else {
-			p.appendLogLocked("[devtui] exited cleanly")
+			p.appendLogLocked("[stacker] exited cleanly")
 		}
 		p.mu.Unlock()
 		close(done)
@@ -187,7 +188,7 @@ func (p *Process) Start(notify func()) error {
 
 func (p *Process) startFailedLocked(err error) {
 	p.status = StatusFailed
-	p.appendLogLocked("[devtui] start failed: " + err.Error())
+	p.appendLogLocked("[stacker] start failed: " + err.Error())
 }
 
 func (p *Process) capture(r io.Reader, stream string, notify func()) {
@@ -199,7 +200,7 @@ func (p *Process) capture(r io.Reader, stream string, notify func()) {
 		notify()
 	}
 	if err := scanner.Err(); err != nil {
-		p.appendLog(fmt.Sprintf("[devtui] %s read error: %v", stream, err))
+		p.appendLog(fmt.Sprintf("[stacker] %s read error: %v", stream, err))
 		notify()
 	}
 }
@@ -227,7 +228,7 @@ func (p *Process) Stop(notify func()) error {
 	p.status = StatusStopping
 	pid := cmd.Process.Pid
 	if !alreadyStopping {
-		p.appendLogLocked("[devtui] sending SIGTERM")
+		p.appendLogLocked("[stacker] sending SIGTERM")
 	}
 	p.mu.Unlock()
 	notify()
@@ -238,7 +239,7 @@ func (p *Process) Stop(notify func()) error {
 			if p.cmd == cmd {
 				p.status = StatusRunning
 			}
-			p.appendLogLocked("[devtui] stop failed: " + err.Error())
+			p.appendLogLocked("[stacker] stop failed: " + err.Error())
 			p.mu.Unlock()
 			notify()
 			return err
@@ -253,7 +254,7 @@ func (p *Process) Stop(notify func()) error {
 	case <-timer.C:
 	}
 
-	p.appendLog("[devtui] graceful timeout reached; sending SIGKILL")
+	p.appendLog("[stacker] graceful timeout reached; sending SIGKILL")
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
@@ -264,7 +265,7 @@ func (p *Process) Stop(notify func()) error {
 func (p *Process) Restart(notify func()) {
 	go func() {
 		if err := p.Stop(notify); err != nil {
-			p.appendLog("[devtui] restart failed while stopping: " + err.Error())
+			p.appendLog("[stacker] restart failed while stopping: " + err.Error())
 			notify()
 			return
 		}
@@ -729,7 +730,7 @@ func loadConfig(path string) (Config, error) {
 }
 
 func main() {
-	configPath := flag.String("config", "devtui.yml", "path to the YAML configuration")
+	configPath := flag.String("config", "stacker.yml", "path to the YAML configuration")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -751,7 +752,7 @@ func main() {
 	_, runErr := program.Run()
 	m.stopAll()
 	if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, tea.ErrProgramKilled)) {
-		fmt.Fprintln(os.Stderr, "devtui error:", runErr)
+		fmt.Fprintln(os.Stderr, "stacker error:", runErr)
 		os.Exit(1)
 	}
 }

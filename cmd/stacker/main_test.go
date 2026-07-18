@@ -106,6 +106,34 @@ func TestStartFailureSetsFailedStatus(t *testing.T) {
 	}
 }
 
+func TestStartInheritsUserPath(t *testing.T) {
+	dir := t.TempDir()
+	probePath := filepath.Join(dir, "stacker-path-probe")
+	if err := os.WriteFile(probePath, []byte("#!/bin/sh\necho inherited-path\n"), 0o755); err != nil {
+		t.Fatalf("write path probe: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	p := NewProcess("test", ProcessConfig{
+		Command: "stacker-path-probe",
+		Cwd:     dir,
+	}, 10)
+	if err := p.Start(func() {}); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		status := p.Status()
+		return status == StatusStopped || status == StatusFailed
+	})
+
+	if p.Status() != StatusStopped {
+		t.Fatalf("expected stopped status, got %q; logs: %q", p.Status(), p.Logs())
+	}
+	if logs := strings.Join(p.Logs(), "\n"); !strings.Contains(logs, "inherited-path") {
+		t.Fatalf("command was not found through inherited PATH; logs: %q", logs)
+	}
+}
+
 func TestStopWaitsForProcessExit(t *testing.T) {
 	p := NewProcess("test", ProcessConfig{
 		Command:         "trap 'exit 0' TERM; while :; do sleep 1; done",
@@ -244,7 +272,7 @@ processes:
 
 func writeConfig(t *testing.T, dir, contents string) string {
 	t.Helper()
-	path := filepath.Join(dir, "devtui.yml")
+	path := filepath.Join(dir, "stacker.yml")
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
