@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -310,7 +309,10 @@ func (p *Process) Restart(notify func()) {
 }
 
 type refreshMsg struct{}
-type copiedMsg struct{ lines int }
+type copiedMsg struct {
+	lines int
+	err   error
+}
 
 type model struct {
 	cfg       Config
@@ -394,7 +396,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitRefresh()
 	case copiedMsg:
-		m.statusText = fmt.Sprintf("Copied %d line(s)", msg.lines)
+		switch {
+		case msg.err != nil:
+			m.statusText = "Copy failed: " + msg.err.Error()
+		case msg.lines > 0:
+			m.statusText = fmt.Sprintf("Copied %d line(s)", msg.lines)
+		default:
+			m.statusText = "Nothing selected to copy"
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
@@ -678,20 +687,11 @@ func (m *model) copySelectionCmd() tea.Cmd {
 		if text == "" {
 			return copiedMsg{lines: 0}
 		}
-		copyOSC52(text)
+		if err := copyToClipboard(text); err != nil {
+			return copiedMsg{lines: 0, err: err}
+		}
 		return copiedMsg{lines: count}
 	}
-}
-
-func copyOSC52(text string) {
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	sequence := "\x1b]52;c;" + encoded + "\a"
-	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-		defer tty.Close()
-		_, _ = tty.WriteString(sequence)
-		return
-	}
-	_, _ = os.Stderr.WriteString(sequence)
 }
 
 func (m *model) stopAllCmd() tea.Cmd {

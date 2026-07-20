@@ -93,10 +93,20 @@ You can also start the workflow manually from the Actions tab and provide the de
 - `f`: free the configured `port` for the selected process
 - mouse wheel: scroll through logs
 - drag with the left mouse button: select lines
-- release the left mouse button: copy the selection
+- release the left mouse button: copy the selection (or `Ctrl+C` while selected)
 - `G` or `End`: return to the bottom
 - `Esc`: clear the selection
 - `q`: quit
+
+### Copy on macOS / iTerm2
+
+Stacker prefers the native clipboard (`pbcopy` on macOS). If that is unavailable, it falls back to OSC 52.
+
+In **iTerm2**, if copy still fails when using OSC 52 (for example over SSH), enable:
+
+**Settings → General → Selection → Applications in terminal may access clipboard**
+
+You should see `Copied N line(s)` in the footer after a successful copy.
 
 ## YAML process options
 
@@ -166,5 +176,5 @@ Only one Stacker TUI is allowed per absolute config path. Agents should:
 
 - process group signaling is best-effort on Windows (`taskkill /T`); Unix uses process groups via `setpgid`
 - selection operates on entire lines, not individual columns;
-- OSC 52 depends on terminal support and configuration;
+- clipboard uses `pbcopy` / `wl-copy` / `xclip` when available, otherwise OSC 52 (terminal must allow it);
 - process health checks and dependencies are not supported yet.
