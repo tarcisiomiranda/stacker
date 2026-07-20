@@ -74,11 +74,30 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$url" ] && [ -n "$output" ]
-cp "${STACKER_TEST_RELEASE_DIRECTORY}/${url##*/}" "$output"
+case "$url" in
+	*/skills/stacker/SKILL.md)
+		cp "${STACKER_TEST_SKILL_FILE}" "$output"
+		;;
+	*)
+		cp "${STACKER_TEST_RELEASE_DIRECTORY}/${url##*/}" "$output"
+		;;
+esac
 MOCK_CURL
 chmod 0755 "${mock_directory}/curl"
 
+# Fake SKILL.md for optional STACKER_INSTALL_SKILLS path.
+skill_file="${TEMPORARY_DIRECTORY}/SKILL.md"
+cat > "$skill_file" <<'SKILL'
+---
+name: stacker
+description: test skill
+---
+# test
+SKILL
+
+# Default: skills off
 STACKER_TEST_RELEASE_DIRECTORY="$release_directory" \
+	STACKER_TEST_SKILL_FILE="$skill_file" \
 	STACKER_INSTALL_DIR="$install_directory" \
 	STACKER_VERSION=v0.0.0 \
 	PATH="${mock_directory}:${PATH}" \
@@ -90,4 +109,48 @@ if [ ! -x "$installed_binary" ]; then
 	exit 1
 fi
 "$installed_binary" -h
+
+# With STACKER_INSTALL_SKILLS=1 and a fake agent home
+fake_home="${TEMPORARY_DIRECTORY}/home"
+mkdir -p "${fake_home}/.claude"
+install_directory_skills="${TEMPORARY_DIRECTORY}/install-skills"
+mkdir -p "$install_directory_skills"
+STACKER_TEST_RELEASE_DIRECTORY="$release_directory" \
+	STACKER_TEST_SKILL_FILE="$skill_file" \
+	STACKER_INSTALL_DIR="$install_directory_skills" \
+	STACKER_VERSION=v0.0.0 \
+	STACKER_INSTALL_SKILLS=1 \
+	HOME="$fake_home" \
+	PATH="${mock_directory}:${PATH}" \
+	/bin/sh "${PROJECT_ROOT}/install.sh"
+
+skill_dest="${fake_home}/.claude/skills/stacker/SKILL.md"
+if [ ! -f "$skill_dest" ]; then
+	printf 'STACKER_INSTALL_SKILLS=1 did not install skill to %s\n' "$skill_dest" >&2
+	exit 1
+fi
+if ! grep -q 'name: stacker' "$skill_dest"; then
+	printf 'Installed skill content looks wrong\n' >&2
+	exit 1
+fi
+
+# Explicitly off: no skill even if agent home exists
+fake_home_off="${TEMPORARY_DIRECTORY}/home-off"
+mkdir -p "${fake_home_off}/.claude"
+install_directory_off="${TEMPORARY_DIRECTORY}/install-off"
+mkdir -p "$install_directory_off"
+STACKER_TEST_RELEASE_DIRECTORY="$release_directory" \
+	STACKER_TEST_SKILL_FILE="$skill_file" \
+	STACKER_INSTALL_DIR="$install_directory_off" \
+	STACKER_VERSION=v0.0.0 \
+	STACKER_INSTALL_SKILLS=0 \
+	HOME="$fake_home_off" \
+	PATH="${mock_directory}:${PATH}" \
+	/bin/sh "${PROJECT_ROOT}/install.sh"
+
+if [ -f "${fake_home_off}/.claude/skills/stacker/SKILL.md" ]; then
+	printf 'STACKER_INSTALL_SKILLS=0 should not install skills\n' >&2
+	exit 1
+fi
+
 printf 'Installer integration test passed\n'

@@ -11,12 +11,14 @@ processes:
     cwd: .
     autostart: false
     graceful_timeout: 8s
+    # port: 8000   # free this port before start/restart (kills external holders)
 
   frontend:
     command: mise run front
     cwd: .
     autostart: false
     graceful_timeout: 8s
+    # port: 3000
 
   demo:
     command: 'i=1; while true; do echo "demo log $i - $(date +%T)"; i=$((i+1)); sleep 1; done'

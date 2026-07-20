@@ -5,6 +5,8 @@ set -eu
 REPOSITORY=${STACKER_REPOSITORY:-tarcisiomiranda/stacker}
 VERSION=${STACKER_VERSION:-latest}
 INSTALL_DIR=${STACKER_INSTALL_DIR:-}
+# Off by default. Set to 1/true/yes/on to detect AI agents and install SKILL.md.
+INSTALL_SKILLS=${STACKER_INSTALL_SKILLS:-0}
 BINARY_NAME=stacker
 
 fail() {
@@ -14,6 +16,94 @@ fail() {
 
 command_exists() {
 	command -v "$1" >/dev/null 2>&1
+}
+
+# Returns 0 when value is a common truthy flag (1, true, yes, on).
+env_truthy() {
+	value=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+	case "$value" in
+		1 | true | yes | on) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Copy skill into dest_dir/SKILL.md when the agent appears installed.
+install_skill_for_agent() {
+	skill_src=$1
+	dest_rel=$2
+	shift 2
+	# Remaining args: path markers relative to $HOME and/or binary names (bin:name).
+	found=0
+	for marker in "$@"; do
+		case "$marker" in
+			bin:*)
+				if command_exists "${marker#bin:}"; then
+					found=1
+					break
+				fi
+				;;
+			*)
+				if [ -e "${HOME}/${marker}" ]; then
+					found=1
+					break
+				fi
+				;;
+		esac
+	done
+	if [ "$found" -eq 0 ]; then
+		return 0
+	fi
+	dest_dir="${HOME}/${dest_rel}"
+	mkdir -p "$dest_dir"
+	install -m 0644 "$skill_src" "${dest_dir}/SKILL.md"
+	printf '  skill → %s\n' "${dest_dir}/SKILL.md"
+}
+
+install_agent_skills() {
+	if [ -z "${HOME:-}" ]; then
+		printf 'Skipping agent skills: HOME is not set.\n'
+		return 0
+	fi
+
+	if [ "$VERSION" = latest ]; then
+		skill_ref=main
+	else
+		skill_ref=$VERSION
+	fi
+	skill_url="https://raw.githubusercontent.com/${REPOSITORY}/${skill_ref}/skills/stacker/SKILL.md"
+	skill_path="${temporary_directory}/SKILL.md"
+
+	printf 'Installing AI agent skills (STACKER_INSTALL_SKILLS is enabled)...\n'
+	if ! curl --proto '=https' --tlsv1.2 -fsSL "$skill_url" -o "$skill_path"; then
+		printf 'warning: could not download skill from %s\n' "$skill_url" >&2
+		return 0
+	fi
+	if [ ! -s "$skill_path" ]; then
+		printf 'warning: downloaded skill file is empty; skipping\n' >&2
+		return 0
+	fi
+
+	# Detect agents via config dirs and PATH binaries; install only when found.
+	install_skill_for_agent "$skill_path" ".claude/skills/stacker" \
+		".claude" "bin:claude"
+	install_skill_for_agent "$skill_path" ".codex/skills/stacker" \
+		".codex" "bin:codex"
+	install_skill_for_agent "$skill_path" ".config/opencode/skills/stacker" \
+		".config/opencode" ".opencode" ".local/share/opencode" "bin:opencode"
+	install_skill_for_agent "$skill_path" ".cursor/skills/stacker" \
+		".cursor" "bin:cursor" "bin:cursor-agent"
+	install_skill_for_agent "$skill_path" ".grok/skills/stacker" \
+		".grok" "bin:grok"
+	install_skill_for_agent "$skill_path" ".agents/skills/stacker" \
+		".agents"
+	install_skill_for_agent "$skill_path" ".gemini/skills/stacker" \
+		".gemini" "bin:gemini"
+	install_skill_for_agent "$skill_path" ".continue/skills/stacker" \
+		".continue"
+	install_skill_for_agent "$skill_path" ".codeium/windsurf/skills/stacker" \
+		".codeium/windsurf" ".windsurf" "bin:windsurf"
+
+	printf 'Agent skill install finished.\n'
 }
 
 command_exists curl || fail "curl is required"
@@ -103,3 +193,9 @@ case ":${PATH}:" in
 	*":${INSTALL_DIR}:"*) ;;
 	*) printf 'Add %s to PATH before running stacker.\n' "$INSTALL_DIR" ;;
 esac
+
+if env_truthy "$INSTALL_SKILLS"; then
+	install_agent_skills
+else
+	printf 'AI agent skills were not installed (default). Enable with STACKER_INSTALL_SKILLS=1.\n'
+fi

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +42,8 @@ type ProcessConfig struct {
 	Cwd             string `yaml:"cwd"`
 	Autostart       bool   `yaml:"autostart"`
 	GracefulTimeout string `yaml:"graceful_timeout"`
+	// Port, when set, is freed (listeners killed) before each start/restart.
+	Port int `yaml:"port"`
 }
 
 type ProcessStatus string
@@ -112,38 +113,73 @@ func (p *Process) Start(notify func()) error {
 	p.status = StatusStarting
 	p.generation++
 	generation := p.generation
+	port := p.Config.Port
 	cwd := p.Config.Cwd
 	if cwd == "" {
 		cwd = "."
 	}
+	command := p.Config.Command
+	p.mu.Unlock()
+
+	if port > 0 {
+		killed, err := freePort(port)
+		if err != nil {
+			p.mu.Lock()
+			if p.generation == generation {
+				p.startFailedLocked(err)
+			}
+			p.mu.Unlock()
+			notify()
+			return err
+		}
+		if len(killed) > 0 {
+			p.appendLog(fmt.Sprintf("[stacker] freed port %d (killed pids=%v)", port, killed))
+			notify()
+		}
+	}
+
 	absCwd, err := filepath.Abs(cwd)
 	if err != nil {
-		p.startFailedLocked(err)
+		p.mu.Lock()
+		if p.generation == generation {
+			p.startFailedLocked(err)
+		}
 		p.mu.Unlock()
 		notify()
 		return err
 	}
 
-	cmd := exec.Command("/bin/sh", "-c", p.Config.Command)
+	cmd := exec.Command(shellName(), shellRunArg(), command)
 	cmd.Dir = absCwd
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		p.startFailedLocked(err)
+		p.mu.Lock()
+		if p.generation == generation {
+			p.startFailedLocked(err)
+		}
 		p.mu.Unlock()
 		notify()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		p.startFailedLocked(err)
+		p.mu.Lock()
+		if p.generation == generation {
+			p.startFailedLocked(err)
+		}
 		p.mu.Unlock()
 		notify()
 		return err
 	}
 
+	p.mu.Lock()
+	if p.generation != generation || p.status != StatusStarting {
+		p.mu.Unlock()
+		return nil
+	}
 	if err := cmd.Start(); err != nil {
 		p.startFailedLocked(err)
 		p.mu.Unlock()
@@ -234,7 +270,7 @@ func (p *Process) Stop(notify func()) error {
 	notify()
 
 	if !alreadyStopping {
-		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := signalProcessGroup(pid, signalTerm); err != nil && !errors.Is(err, errProcessNotFound) {
 			p.mu.Lock()
 			if p.cmd == cmd {
 				p.status = StatusRunning
@@ -255,7 +291,7 @@ func (p *Process) Stop(notify func()) error {
 	}
 
 	p.appendLog("[stacker] graceful timeout reached; sending SIGKILL")
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalProcessGroup(pid, signalKill); err != nil && !errors.Is(err, errProcessNotFound) {
 		return err
 	}
 	<-done
@@ -390,6 +426,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if p := m.current(); p != nil {
 				p.Restart(m.notify)
 			}
+		case "f":
+			if p := m.current(); p != nil && p.Config.Port > 0 {
+				go func(proc *Process) {
+					killed, err := freePort(proc.Config.Port)
+					if err != nil {
+						proc.appendLog("[stacker] free-port failed: " + err.Error())
+					} else if len(killed) == 0 {
+						proc.appendLog(fmt.Sprintf("[stacker] port %d: nothing listening", proc.Config.Port))
+					} else {
+						proc.appendLog(fmt.Sprintf("[stacker] freed port %d (killed pids=%v)", proc.Config.Port, killed))
+					}
+					m.notify()
+				}(p)
+			}
 		case "pgup":
 			m.scrollLogs(-m.visibleLogLines())
 		case "pgdown":
@@ -472,7 +522,7 @@ func (m *model) View() string {
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("Enter start • s stop • r restart • wheel scroll • drag copy • G bottom • q quit")
+	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • wheel scroll • drag copy • G bottom • q quit")
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
@@ -710,6 +760,9 @@ func loadConfig(path string) (Config, error) {
 				return Config{}, fmt.Errorf("process %q has invalid graceful_timeout %q", name, processCfg.GracefulTimeout)
 			}
 		}
+		if processCfg.Port < 0 || processCfg.Port > 65535 {
+			return Config{}, fmt.Errorf("process %q has invalid port %d", name, processCfg.Port)
+		}
 		if processCfg.Cwd == "" {
 			processCfg.Cwd = "."
 		}
@@ -730,10 +783,12 @@ func loadConfig(path string) (Config, error) {
 }
 
 func main() {
-	configPath := flag.String("config", "stacker.yml", "path to the YAML configuration")
-	flag.Parse()
+	configPath, rest := parseArgs(os.Args[1:])
+	if len(rest) > 0 {
+		os.Exit(runCLI(configPath, rest))
+	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
 		os.Exit(1)
@@ -743,6 +798,13 @@ func main() {
 	defer stopSignals()
 
 	m := newModel(cfg)
+	control, err := startControlServer(m, configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "control plane error:", err)
+		os.Exit(1)
+	}
+	defer control.Close()
+
 	program := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),
@@ -755,6 +817,40 @@ func main() {
 		fmt.Fprintln(os.Stderr, "stacker error:", runErr)
 		os.Exit(1)
 	}
+}
+
+// parseArgs extracts -config and leaves CLI subcommands in rest.
+// Examples: stacker list --json | stacker -config app.yml restart api
+func parseArgs(args []string) (configPath string, rest []string) {
+	configPath = "stacker.yml"
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-h" || a == "--help":
+			// bare help without subcommand → CLI help when no TUI intent
+			rest = append(rest, "help")
+		case a == "-config" || a == "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
+		case strings.HasPrefix(a, "-config="):
+			configPath = strings.TrimPrefix(a, "-config=")
+		case strings.HasPrefix(a, "--config="):
+			configPath = strings.TrimPrefix(a, "--config=")
+		case a == "-json" || a == "--json":
+			rest = append(rest, a)
+		default:
+			// stop treating leading flags after first non-flag for simplicity
+			if strings.HasPrefix(a, "-") && len(rest) == 0 {
+				// unknown root flag — keep for flag package? ignore and pass through
+				rest = append(rest, a)
+				continue
+			}
+			rest = append(rest, a)
+		}
+	}
+	return configPath, rest
 }
 
 func clamp(v, low, high int) int {

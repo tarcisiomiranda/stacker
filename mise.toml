@@ -43,3 +43,19 @@ run = "shellcheck install.sh scripts/*.sh"
 [tasks."test:installer"]
 description = "Test the release installer without network access"
 run = "scripts/test-installer.sh"
+
+[tasks."skills:list"]
+description = "List AI coding agents detected on this machine"
+run = "python scripts/install_skills.py --list"
+
+[tasks."skills:install"]
+description = "Detect AI agents and install Stacker SKILL.md for them"
+run = "python scripts/install_skills.py"
+
+[tasks."skills:install:all"]
+description = "Install Stacker SKILL.md for every known agent path"
+run = "python scripts/install_skills.py --all"
+
+[tasks."test:skills"]
+description = "Test the skill installer"
+run = "python -m unittest discover -s scripts -p 'test_install_skills.py'"

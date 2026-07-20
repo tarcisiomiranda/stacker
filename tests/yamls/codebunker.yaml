@@ -1,0 +1,75 @@
+# CodeBunker local stack
+# Run with: stacker -config /srv/stacker.yml
+# Commands inherit PATH from the user running Stacker.
+version: 1
+
+ui:
+  wheel_lines: 3
+  copy_on_release: true
+  max_log_lines: 10000
+
+processes:
+  codebunker:
+    command: codebunker run --config /srv/codebunker.toml
+    cwd: .
+    autostart: true
+    graceful_timeout: 8s
+
+  auth-back:
+    command: >-
+      PORT=8014
+      ISSUER=https://auth.codebunker.bunker.rest
+      mise run back:dev
+    cwd: ./bunker-auth
+    autostart: true
+    graceful_timeout: 10s
+
+  auth-front:
+    command: mise run front:dev
+    cwd: ./bunker-auth
+    autostart: true
+    graceful_timeout: 8s
+
+  data:
+    command: mise run back:dev
+    cwd: ./bunker-data
+    autostart: true
+    graceful_timeout: 10s
+
+  obs:
+    command: mise run back:dev
+    cwd: ./bunker-observability
+    autostart: true
+    graceful_timeout: 10s
+
+  cicd:
+    command: mise run back:dev
+    cwd: ./bunker-cicd
+    autostart: true
+    graceful_timeout: 15s
+
+  admin:
+    command: mise run front:dev
+    cwd: ./bunker-admin
+    autostart: true
+    graceful_timeout: 8s
+
+  page:
+    command: mise run front:dev
+    cwd: ./bunker-page
+    autostart: true
+    graceful_timeout: 8s
+
+  api:
+    command: mise run back:dev
+    cwd: ./bunker-api
+    autostart: true
+    graceful_timeout: 10s
+
+  # data/obs UI is provided by bunker-admin.
+
+  router:
+    command: mise run router:dev
+    cwd: ./bunker-router
+    autostart: true
+    graceful_timeout: 8s

@@ -4,6 +4,8 @@ Terminal process supervisor written in Go and configured with YAML.
 
 - processes defined in YAML;
 - graceful start, stop, and restart;
+- optional `port` that is freed before start (kills stray listeners on Linux, macOS, and Windows);
+- CLI control plane so agents can list/start/stop/restart without spawning parallel services;
 - separate stdout and stderr capture;
 - scrollable logs with a configurable memory limit;
 - drag selection and copying through OSC 52;
@@ -16,6 +18,15 @@ curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/instal
 ```
 
 The installer detects the operating system and architecture, downloads the latest release, and verifies its SHA-256 checksum. When run as `root`, it installs Stacker in `/usr/local/bin`. For other users, it falls back to `~/.local/bin` when `/usr/local/bin` is not writable.
+
+**Agent skills are off by default.** To also detect AI tools on the machine (Claude Code, Codex, OpenCode, Cursor, Grok, …) and install the Stacker `SKILL.md` for them:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/install.sh \
+  | STACKER_INSTALL_SKILLS=1 bash
+```
+
+Accepted truthy values for `STACKER_INSTALL_SKILLS`: `1`, `true`, `yes`, `on`.
 
 To choose an installation directory or a specific version:
 
@@ -79,6 +90,7 @@ You can also start the workflow manually from the Actions tab and provide the de
 - `Enter`: start
 - `s`: stop
 - `r`: restart
+- `f`: free the configured `port` for the selected process
 - mouse wheel: scroll through logs
 - drag with the left mouse button: select lines
 - release the left mouse button: copy the selection
@@ -86,9 +98,73 @@ You can also start the workflow manually from the Actions tab and provide the de
 - `Esc`: clear the selection
 - `q`: quit
 
+## YAML process options
+
+```yaml
+processes:
+  backend:
+    command: mise run back:dev
+    cwd: .
+    autostart: false      # listed in the TUI, but do not start until Enter/CLI
+    graceful_timeout: 8s
+    port: 8000            # free this TCP port before every start/restart
+```
+
+When `port` is set, Stacker terminates whatever is listening on that port before start. Use this when an IDE or AI agent left an API process bound and `restart` would fail with “address already in use”.
+
+## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, …)
+
+Stacker ships an [Agent Skills](https://agentskills.io/specification)-compatible skill so coding agents use the CLI instead of starting services in parallel.
+
+Canonical source: `skills/stacker/SKILL.md`
+
+```bash
+# Detect which AI agents exist on this machine, then install the skill
+mise run skills:list
+mise run skills:install
+
+# Or call the script directly
+python scripts/install_skills.py --list
+python scripts/install_skills.py              # detected tools only
+python scripts/install_skills.py --all        # every known path
+python scripts/install_skills.py --dry-run
+```
+
+| Tool | Project path | Global path |
+|------|--------------|-------------|
+| Claude Code | `.claude/skills/stacker/` | `~/.claude/skills/stacker/` |
+| OpenAI Codex | `.codex/skills/stacker/` | `~/.codex/skills/stacker/` |
+| OpenCode | `.opencode/skills/stacker/` | `~/.config/opencode/skills/stacker/` |
+| Cursor | `.cursor/skills/stacker/` | `~/.cursor/skills/stacker/` |
+| Grok | `.grok/skills/stacker/` | `~/.grok/skills/stacker/` |
+| Generic | `.agents/skills/stacker/` | `~/.agents/skills/stacker/` |
+
+See `skills/README.md` for details.
+
+## CLI (for scripts and AI agents)
+
+Start the TUI once per project config. While it is running, use the CLI instead of launching services yourself:
+
+```bash
+stacker -config stacker.yml     # TUI + local control plane
+stacker ping                    # exit 0 if running for this config
+stacker list --json
+stacker status backend --json
+stacker start backend
+stacker stop backend
+stacker restart backend
+stacker free-port 8000          # works without the TUI
+```
+
+Only one Stacker TUI is allowed per absolute config path. Agents should:
+
+1. `stacker ping` (or `list`) for the project `stacker.yml`
+2. if running, `restart` / `start` / `stop` via CLI
+3. never start the same service with `mise run …` or `go run …` in parallel
+
 ## Current limitations
 
-- commands run through `/bin/sh -c`, so Stacker currently targets Linux and macOS;
+- process group signaling is best-effort on Windows (`taskkill /T`); Unix uses process groups via `setpgid`
 - selection operates on entire lines, not individual columns;
 - OSC 52 depends on terminal support and configuration;
 - process health checks and dependencies are not supported yet.

@@ -20,6 +20,7 @@ processes:
     cwd: ./relative/directory
     autostart: false
     graceful_timeout: 8s
+    port: 8000
 ```
 
 ### Root fields
@@ -40,10 +41,11 @@ processes:
 
 Each key below `processes` is the process name displayed in the TUI. Names must be non-empty and unique.
 
-- `command`: required, non-empty string executed with `/bin/sh -c`. It inherits the environment, including `PATH`, from the user who launched Stacker. Prefer a project task such as `mise run back:dev` instead of duplicating a long command.
+- `command`: required, non-empty string executed with `/bin/sh -c` (Unix) or `cmd /C` (Windows). It inherits the environment, including `PATH`, from the user who launched Stacker. Prefer a project task such as `mise run back:dev` instead of duplicating a long command.
 - `cwd`: optional directory. Relative paths are resolved from the directory containing `stacker.yml`. The directory must already exist. Omission means `.`.
-- `autostart`: optional boolean. Omission means `false`.
+- `autostart`: optional boolean. Omission means `false`. When `false`, the process is registered in the TUI but does not start until the user (or CLI) starts it.
 - `graceful_timeout`: optional positive Go duration such as `500ms`, `8s`, `2m`, or `1m30s`. Omission means `8s`.
+- `port`: optional TCP port (`1`–`65535`). When set, Stacker frees that port (terminates listeners) before every start/restart so a stray process left by an IDE/AI agent does not block the bind. Omission means no automatic free-port.
 - Do not add any other process fields.
 
 ### Command formatting
@@ -69,8 +71,40 @@ Each key below `processes` is the process name displayed in the TUI. Names must 
 2. Confirm that every configured `cwd` exists.
 3. Add one process entry per independently managed long-running service.
 4. Enable `autostart` only for services that should start whenever Stacker opens.
-5. Keep `version: 1` and remove all undocumented fields.
-6. Run `mise run test` and `mise run build` after changing application code. For configuration-only changes, launch `./bin/stacker -config stacker.yml` and confirm the processes start and stop correctly.
+5. Set `port` when the service binds a fixed TCP port so start/restart can reclaim it.
+6. Keep `version: 1` and remove all undocumented fields.
+7. Run `mise run test` and `mise run build` after changing application code. For configuration-only changes, launch `./bin/stacker -config stacker.yml` and confirm the processes start and stop correctly.
+
+### CLI (control plane)
+
+While the TUI is running for a given config, AI agents and scripts should use the CLI instead of starting services in parallel:
+
+```bash
+stacker -config stacker.yml              # start TUI + control plane
+stacker ping                             # is an instance running?
+stacker list --json                      # process names and status
+stacker start backend
+stacker stop backend
+stacker restart backend
+stacker free-port 8000                   # works even without the TUI
+```
+
+Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
+
+### Agent skills (multi-tool)
+
+Canonical skill: `skills/stacker/SKILL.md` (Agent Skills / `SKILL.md` standard).
+
+Detect AIs on the machine and install into their skill dirs:
+
+```bash
+python scripts/install_skills.py --list   # what is installed on this PC
+python scripts/install_skills.py          # install for detected tools
+python scripts/install_skills.py --all    # every known tool path
+mise run skills:install
+```
+
+When editing the skill body, change `skills/stacker/SKILL.md` only, then re-run the installer so tool-specific copies stay in sync.
 
 ### Complete example
 
