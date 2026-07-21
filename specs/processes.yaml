@@ -39,6 +39,12 @@ rest:
       path: cmd/stacker/control.go
     - name: POST /v1/free-port
       path: cmd/stacker/control.go
+    - name: GET /
+      path: cmd/stacker/web.go
+    - name: GET /logs/{name}
+      path: cmd/stacker/web.go
+    - name: GET /logs/{name}/raw
+      path: cmd/stacker/web.go
 
 frontend:
   pages: []
@@ -48,4 +54,6 @@ frontend:
       path: cmd/stacker/main.go
     - name: Log panel
       path: cmd/stacker/main.go
+    - name: Web log viewer (index + logs page)
+      path: cmd/stacker/web.go
   types: []

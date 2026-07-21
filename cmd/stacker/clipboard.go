@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,11 +38,9 @@ func copyNative(text string) error {
 		return runClipboardCmd(text, "powershell", "-NoProfile", "-Command",
 			"Set-Clipboard -Value ([Console]::In.ReadToEnd())")
 	default:
-		// Linux and other Unix: Wayland, then X11.
-		if err := runClipboardCmd(text, "wl-copy", "--foreground"); err == nil {
-			return nil
-		}
-		// Without --foreground, wl-copy may daemonize; plain form as fallback.
+		// Linux and other Unix: Wayland, then X11. Plain wl-copy forks a
+		// background process that keeps serving the clipboard; --foreground
+		// would block until replaced and lose the clipboard when killed.
 		if err := runClipboardCmd(text, "wl-copy"); err == nil {
 			return nil
 		}
@@ -66,7 +65,14 @@ func runClipboardCmd(text string, name string, args ...string) error {
 	cmd.Stdin = strings.NewReader(text)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	// wl-copy forks a daemon that inherits the stderr pipe; without WaitDelay,
+	// Wait would block on that pipe until the daemon dies (i.e. forever).
+	cmd.WaitDelay = 200 * time.Millisecond
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrWaitDelay) {
+			// Process exited successfully; only the inherited pipe stayed open.
+			return nil
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s: timed out", name)
 		}

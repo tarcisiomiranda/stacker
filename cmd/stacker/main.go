@@ -313,6 +313,10 @@ type copiedMsg struct {
 	lines int
 	err   error
 }
+type webMsg struct {
+	url string
+	err error
+}
 
 type model struct {
 	cfg       Config
@@ -329,6 +333,8 @@ type model struct {
 
 	statusText string
 	refreshCh  chan struct{}
+	configPath string
+	web        *webServer
 }
 
 var (
@@ -404,6 +410,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.statusText = "Nothing selected to copy"
 		}
+	case webMsg:
+		if msg.err != nil {
+			m.statusText = "Web logs: " + msg.url + " (browser failed: " + msg.err.Error() + ")"
+		} else {
+			m.statusText = "Web logs: " + msg.url + " (URL copied, browser opened)"
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q":
@@ -449,6 +461,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notify()
 				}(p)
 			}
+		case "w":
+			if m.web != nil {
+				ws := m.web
+				m.web = nil
+				m.statusText = "Web logs stopped"
+				go ws.Close()
+				break
+			}
+			ws, err := startWebServer(m, m.configPath)
+			if err != nil {
+				m.statusText = "Web logs failed: " + err.Error()
+				break
+			}
+			m.web = ws
+			target := "http://" + ws.Addr() + "/"
+			if p := m.current(); p != nil {
+				target = webLogsURL(ws.Addr(), p.Name)
+			}
+			return m, m.openWebCmd(target)
 		case "pgup":
 			m.scrollLogs(-m.visibleLogLines())
 		case "pgdown":
@@ -531,7 +562,7 @@ func (m *model) View() string {
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • wheel scroll • drag copy • G bottom • q quit")
+	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • wheel scroll • drag copy • G bottom • q quit")
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
@@ -694,6 +725,17 @@ func (m *model) copySelectionCmd() tea.Cmd {
 	}
 }
 
+func (m *model) openWebCmd(target string) tea.Cmd {
+	return func() tea.Msg {
+		// Copy the URL so it can be pasted even if no browser opens (e.g. SSH).
+		_ = copyToClipboard(target)
+		if err := openBrowser(target); err != nil {
+			return webMsg{url: target, err: err}
+		}
+		return webMsg{url: target}
+	}
+}
+
 func (m *model) stopAllCmd() tea.Cmd {
 	return func() tea.Msg {
 		m.stopAll()
@@ -804,6 +846,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer control.Close()
+	m.configPath = control.config
 
 	program := tea.NewProgram(
 		m,
@@ -812,6 +855,9 @@ func main() {
 		tea.WithContext(ctx),
 	)
 	_, runErr := program.Run()
+	if m.web != nil {
+		m.web.Close()
+	}
 	m.stopAll()
 	if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, tea.ErrProgramKilled)) {
 		fmt.Fprintln(os.Stderr, "stacker error:", runErr)

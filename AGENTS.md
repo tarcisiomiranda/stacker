@@ -91,6 +91,8 @@ stacker free-port 8000                   # works even without the TUI
 
 Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
 
+Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed): `GET /` (process index), `GET /logs/{name}` (HTML page with copy button and auto-refresh), and `GET /logs/{name}/raw` (plain text). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down.
+
 ### Agent skills (multi-tool)
 
 Canonical skill: `skills/stacker/SKILL.md` (Agent Skills / `SKILL.md` standard).

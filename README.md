@@ -8,7 +8,8 @@ Terminal process supervisor written in Go and configured with YAML.
 - CLI control plane so agents can list/start/stop/restart without spawning parallel services;
 - separate stdout and stderr capture;
 - scrollable logs with a configurable memory limit;
-- drag selection and copying through OSC 52;
+- drag selection and copying through native clipboard tools with OSC 52 fallback;
+- on-demand web log viewer (`w` key) on 127.0.0.1 with a random high port;
 - termination of the entire process group on Linux and macOS.
 
 ## Quick installation

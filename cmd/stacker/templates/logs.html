@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Name}} — Stacker logs</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+/* Minimal fallback so the page stays usable if the Tailwind CDN is offline. */
+body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
+pre { overflow: auto; }
+</style>
+</head>
+<body class="bg-neutral-950 text-neutral-200 font-mono h-screen flex overflow-hidden text-sm">
+
+<aside class="w-56 shrink-0 flex flex-col border-r border-neutral-800 bg-neutral-900">
+  <a href="/" class="px-4 py-3 font-bold border-b border-neutral-800 hover:text-white">Stacker</a>
+  <nav class="flex-1 overflow-y-auto py-2">
+    {{range .Processes}}
+    <a href="/logs/{{.NameEscaped}}"
+       class="flex items-center justify-between gap-2 px-4 py-1.5 hover:bg-neutral-800 {{if .Current}}bg-neutral-800 text-white border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
+      <span class="truncate">{{.Name}}</span>
+      <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+    </a>
+    {{end}}
+  </nav>
+</aside>
+
+<main class="flex-1 flex flex-col min-w-0">
+  <header id="topbar" class="flex items-center gap-4 flex-wrap px-4 py-2 border-b border-neutral-800 bg-neutral-900">
+    <h2 class="font-bold">
+      {{.Name}}
+      <span class="{{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}]</span>
+    </h2>
+    <button id="copy"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Copy all</button>
+    <label class="select-none flex items-center gap-1.5">
+      <input type="checkbox" id="follow" checked class="accent-sky-400">
+      auto-refresh <span class="text-neutral-500">(Space freezes)</span>
+    </label>
+    <span id="frozen" class="hidden text-amber-400">⏸ frozen</span>
+    <a href="/logs/{{.NameEscaped}}/raw" class="text-sky-400 hover:underline">raw</a>
+    <span id="msg" class="text-neutral-400"></span>
+  </header>
+  <pre id="log" class="flex-1 overflow-auto p-4 whitespace-pre-wrap break-all">{{.Logs}}</pre>
+</main>
+
+<script>
+const rawURL = "/logs/{{.NameEscaped}}/raw";
+const log = document.getElementById("log");
+const msg = document.getElementById("msg");
+const follow = document.getElementById("follow");
+const frozen = document.getElementById("frozen");
+const topbar = document.getElementById("topbar");
+
+function syncFrozen() {
+  frozen.classList.toggle("hidden", follow.checked);
+  topbar.classList.toggle("bg-amber-950", !follow.checked);
+  topbar.classList.toggle("bg-neutral-900", follow.checked);
+}
+follow.addEventListener("change", syncFrozen);
+
+// Space toggles the freeze so logs stop moving while selecting text to copy.
+addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || e.target.tagName === "INPUT") return;
+  e.preventDefault();
+  follow.checked = !follow.checked;
+  syncFrozen();
+});
+
+document.getElementById("copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(log.textContent);
+    msg.textContent = "copied";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(log);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    msg.textContent = "select + Ctrl+C";
+  }
+  setTimeout(() => { msg.textContent = ""; }, 2000);
+});
+
+async function refresh() {
+  if (!follow.checked) return;
+  try {
+    const resp = await fetch(rawURL);
+    if (!resp.ok) return;
+    const text = await resp.text();
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
+    log.textContent = text;
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  } catch {}
+}
+setInterval(refresh, 2000);
+log.scrollTop = log.scrollHeight;
+</script>
+</body>
+</html>

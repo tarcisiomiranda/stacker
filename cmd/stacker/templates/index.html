@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stacker</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+/* Minimal fallback so the page stays usable if the Tailwind CDN is offline. */
+body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
+</style>
+</head>
+<body class="bg-neutral-950 text-neutral-200 font-mono min-h-screen text-sm">
+<div class="max-w-xl mx-auto p-8">
+  <h1 class="font-bold text-base mb-1">Stacker</h1>
+  <p class="text-neutral-500 mb-6 break-all">{{.Config}}</p>
+  <nav class="flex flex-col border border-neutral-800 divide-y divide-neutral-800">
+    {{range .Processes}}
+    <a href="/logs/{{.NameEscaped}}"
+       class="flex items-center justify-between gap-2 px-4 py-2 hover:bg-neutral-800">
+      <span class="truncate">{{.Name}}</span>
+      <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+    </a>
+    {{end}}
+  </nav>
+</div>
+</body>
+</html>
