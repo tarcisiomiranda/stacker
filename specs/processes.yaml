@@ -45,6 +45,10 @@ rest:
       path: cmd/stacker/web.go
     - name: GET /logs/{name}/raw
       path: cmd/stacker/web.go
+    - name: POST /api/{name}/restart
+      path: cmd/stacker/web.go
+    - name: POST /api/{name}/mark
+      path: cmd/stacker/web.go
 
 frontend:
   pages: []

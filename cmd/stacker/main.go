@@ -297,6 +297,17 @@ func (p *Process) Stop(notify func()) error {
 	return nil
 }
 
+// Mark appends a visual separator to the logs so everything after it is
+// clearly "new" (blank line, timestamped rule, blank line).
+func (p *Process) Mark() {
+	stamp := time.Now().Format("15:04:05")
+	p.mu.Lock()
+	p.appendLogLocked("")
+	p.appendLogLocked(fmt.Sprintf("────────── mark %s ──────────", stamp))
+	p.appendLogLocked("")
+	p.mu.Unlock()
+}
+
 func (p *Process) Restart(notify func()) {
 	go func() {
 		if err := p.Stop(notify); err != nil {
@@ -447,6 +458,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if p := m.current(); p != nil {
 				p.Restart(m.notify)
 			}
+		case " ":
+			if p := m.current(); p != nil {
+				p.Mark()
+				m.notify()
+			}
 		case "f":
 			if p := m.current(); p != nil && p.Config.Port > 0 {
 				go func(proc *Process) {
@@ -562,7 +578,7 @@ func (m *model) View() string {
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • wheel scroll • drag copy • G bottom • q quit")
+	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • space mark • wheel scroll • drag copy • G bottom • q quit")
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}

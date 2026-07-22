@@ -17,11 +17,15 @@ pre { overflow: auto; }
   <a href="/" class="px-4 py-3 font-bold border-b border-neutral-800 hover:text-white">Stacker</a>
   <nav class="flex-1 overflow-y-auto py-2">
     {{range .Processes}}
-    <a href="/logs/{{.NameEscaped}}"
-       class="flex items-center justify-between gap-2 px-4 py-1.5 hover:bg-neutral-800 {{if .Current}}bg-neutral-800 text-white border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
-      <span class="truncate">{{.Name}}</span>
-      <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
-    </a>
+    <div class="flex items-stretch hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
+      <a href="/logs/{{.NameEscaped}}"
+         class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
+        <span class="truncate">{{.Name}}</span>
+        <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+      </a>
+      <button data-restart="{{.NameEscaped}}" title="restart {{.Name}}"
+              class="px-2 text-neutral-500 hover:text-white cursor-pointer">↻</button>
+    </div>
     {{end}}
   </nav>
 </aside>
@@ -34,6 +38,10 @@ pre { overflow: auto; }
     </h2>
     <button id="copy"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Copy all</button>
+    <button id="mark" title="insert separator (M)"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Mark</button>
+    <button data-restart="{{.NameEscaped}}"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Restart</button>
     <label class="select-none flex items-center gap-1.5">
       <input type="checkbox" id="follow" checked class="accent-sky-400">
       auto-refresh <span class="text-neutral-500">(Space freezes)</span>
@@ -61,11 +69,44 @@ function syncFrozen() {
 follow.addEventListener("change", syncFrozen);
 
 // Space toggles the freeze so logs stop moving while selecting text to copy.
+// M inserts a separator so everything after it reads as new logs.
 addEventListener("keydown", (e) => {
-  if (e.code !== "Space" || e.target.tagName === "INPUT") return;
-  e.preventDefault();
-  follow.checked = !follow.checked;
-  syncFrozen();
+  if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
+  if (e.code === "Space") {
+    e.preventDefault();
+    follow.checked = !follow.checked;
+    syncFrozen();
+  } else if (e.key === "m" || e.key === "M") {
+    markNow();
+  }
+});
+
+const markURL = "/api/{{.NameEscaped}}/mark";
+async function markNow() {
+  try {
+    await fetch(markURL, { method: "POST" });
+    msg.textContent = "marked";
+    refresh(true);
+  } catch {
+    msg.textContent = "mark failed";
+  }
+  setTimeout(() => { msg.textContent = ""; }, 2000);
+}
+document.getElementById("mark").addEventListener("click", markNow);
+
+document.querySelectorAll("[data-restart]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      await fetch("/api/" + btn.dataset.restart + "/restart", { method: "POST" });
+      msg.textContent = "restart sent";
+      // Reload so sidebar/topbar statuses reflect the restart.
+      setTimeout(() => location.reload(), 1000);
+    } catch {
+      msg.textContent = "restart failed";
+      btn.disabled = false;
+    }
+  });
 });
 
 document.getElementById("copy").addEventListener("click", async () => {
@@ -83,8 +124,8 @@ document.getElementById("copy").addEventListener("click", async () => {
   setTimeout(() => { msg.textContent = ""; }, 2000);
 });
 
-async function refresh() {
-  if (!follow.checked) return;
+async function refresh(force) {
+  if (!follow.checked && !force) return;
   try {
     const resp = await fetch(rawURL);
     if (!resp.ok) return;

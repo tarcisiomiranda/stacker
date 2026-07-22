@@ -128,6 +128,44 @@ processes:
 		t.Fatalf("unknown process status %d", resp.StatusCode)
 	}
 
+	// Mark: appends a separator to the logs.
+	markResp, err := client.Post("http://"+ws.Addr()+"/api/demo/mark", "", nil)
+	if err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	markResp.Body.Close()
+	if markResp.StatusCode != http.StatusOK {
+		t.Fatalf("mark status %d", markResp.StatusCode)
+	}
+	found := false
+	for _, line := range m.processes[0].Logs() {
+		if strings.Contains(line, "mark ") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("mark separator not appended to logs")
+	}
+
+	// Restart: accepted for a known process, 404 for unknown.
+	restartResp, err := client.Post("http://"+ws.Addr()+"/api/demo/restart", "", nil)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	restartResp.Body.Close()
+	if restartResp.StatusCode != http.StatusOK {
+		t.Fatalf("restart status %d", restartResp.StatusCode)
+	}
+	badResp, err := client.Post("http://"+ws.Addr()+"/api/nope/restart", "", nil)
+	if err != nil {
+		t.Fatalf("restart unknown: %v", err)
+	}
+	badResp.Body.Close()
+	if badResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("restart unknown status %d", badResp.StatusCode)
+	}
+
 	// Toggle off: the server must stop accepting connections.
 	addr := ws.Addr()
 	ws.Close()

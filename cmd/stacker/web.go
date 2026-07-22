@@ -46,6 +46,7 @@ func startWebServer(m *model, config string) (*webServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ws.handleIndex)
 	mux.HandleFunc("/logs/", ws.handleLogsPage)
+	mux.HandleFunc("/api/", ws.handleAction)
 	ws.server = &http.Server{Handler: mux}
 	go func() { _ = ws.server.Serve(ln) }()
 	return ws, nil
@@ -132,6 +133,41 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		"Logs":        logs,
 		"Processes":   ws.processRows(p.Name),
 	})
+}
+
+// handleAction runs process actions from the web page:
+// POST /api/{name}/restart and POST /api/{name}/mark.
+func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		http.Error(w, "expected /api/{name}/{restart|mark}", http.StatusBadRequest)
+		return
+	}
+	name, err := url.PathUnescape(parts[0])
+	if err != nil {
+		http.Error(w, "invalid process name", http.StatusBadRequest)
+		return
+	}
+	p := ws.m.processByName(name)
+	if p == nil {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"ok": false, "error": fmt.Sprintf("unknown process %q", name)})
+		return
+	}
+	switch parts[1] {
+	case "restart":
+		p.Restart(ws.m.notify)
+	case "mark":
+		p.Mark()
+		ws.m.notify()
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "process": processInfo(p)})
 }
 
 // webLogsURL builds the browser URL for a process's log page.
