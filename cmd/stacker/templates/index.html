@@ -19,7 +19,7 @@ body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
     <a href="/logs/{{.NameEscaped}}"
        class="flex items-center justify-between gap-2 px-4 py-2 hover:bg-neutral-800">
       <span class="truncate flex items-center gap-1.5">{{if .Color}}<span class="inline-block size-2 rounded-full shrink-0" style="background: {{.Color}}"></span>{{end}}{{.Name}}</span>
-      <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+      <span class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
     </a>
     {{end}}
   </nav>

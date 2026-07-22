@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,14 @@ type UIConfig struct {
 	WheelLines    int  `yaml:"wheel_lines"`
 	CopyOnRelease bool `yaml:"copy_on_release"`
 	MaxLogLines   int  `yaml:"max_log_lines"`
+	// WordWrap is the initial wrap state for logs in the TUI and web viewer;
+	// both can toggle it at runtime (TUI key `W`, web checkbox).
+	WordWrap bool `yaml:"word_wrap"`
+	// HighlightErrors enables error detection on captured output: lines that
+	// look like errors (tracebacks, panics, ERROR levels) turn the process
+	// badge orange in the TUI and web viewer even while it keeps running.
+	// Off by default; the cost is one regex match per log line.
+	HighlightErrors bool `yaml:"highlight_errors"`
 }
 
 type ProcessConfig struct {
@@ -98,11 +107,17 @@ type Process struct {
 	Name   string
 	Config ProcessConfig
 
+	// detectErrors mirrors ui.highlight_errors; set once at startup.
+	detectErrors bool
+
 	mu         sync.Mutex
 	cmd        *exec.Cmd
 	status     ProcessStatus
 	logs       []string
 	maxLogs    int
+	// errCount is the number of error-looking output lines since the last
+	// start or mark (mark = user acknowledged them).
+	errCount int
 	// dropped is the absolute index of logs[0]: lines trimmed by the memory
 	// cap. Lets clients tail incrementally with stable absolute offsets.
 	dropped    int
@@ -121,6 +136,32 @@ func (p *Process) Status() ProcessStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.status
+}
+
+// Color is the only Config field mutated at runtime (TUI `c` / web selector),
+// so reads and writes go through the mutex.
+func (p *Process) Color() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Config.Color
+}
+
+func (p *Process) SetColor(c string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Config.Color = c
+}
+
+// errLineRe matches output lines that look like errors: Python tracebacks and
+// exceptions, Go panics, JS/TS errors, npm/Rust/log-level markers. Matched per
+// line at capture time, only when ui.highlight_errors is on.
+var errLineRe = regexp.MustCompile(`Traceback \(most recent call last\)|\bpanic:|\bfatal error:|\b[A-Z][A-Za-z]+(?:Error|Exception)\b|\bError:|\bERROR\b|\berror(?::|\[)|\bERR!|\bFATAL\b|\bCRITICAL\b|\bUnhandled(?:PromiseRejection|Rejection)\b`)
+
+// Errors is the count of error-looking lines since the last start/mark.
+func (p *Process) Errors() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.errCount
 }
 
 func (p *Process) Logs() []string {
@@ -172,6 +213,7 @@ func (p *Process) Start(notify func()) error {
 		return nil
 	}
 	p.status = StatusStarting
+	p.errCount = 0
 	p.generation++
 	generation := p.generation
 	port := p.Config.Port
@@ -293,7 +335,13 @@ func (p *Process) capture(r io.Reader, stream string, notify func()) {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
-		p.appendLog(fmt.Sprintf("[%s] %s", stream, sanitizeLogLine(scanner.Text())))
+		text := sanitizeLogLine(scanner.Text())
+		p.mu.Lock()
+		p.appendLogLocked(fmt.Sprintf("[%s] %s", stream, text))
+		if p.detectErrors && errLineRe.MatchString(text) {
+			p.errCount++
+		}
+		p.mu.Unlock()
 		notify()
 	}
 	if err := scanner.Err(); err != nil {
@@ -367,6 +415,8 @@ func (p *Process) Mark() {
 	p.appendLogLocked("")
 	p.appendLogLocked(fmt.Sprintf("────────── mark %s ──────────", stamp))
 	p.appendLogLocked("")
+	// Marking acknowledges past errors: the badge clears until a new one.
+	p.errCount = 0
 	p.mu.Unlock()
 }
 
@@ -390,6 +440,11 @@ type webMsg struct {
 	url string
 	err error
 }
+type colorSavedMsg struct {
+	name  string
+	color string
+	err   error
+}
 
 type model struct {
 	cfg       Config
@@ -399,6 +454,8 @@ type model struct {
 	height    int
 	logOffset int
 	follow    bool
+	wrap      bool
+	showHelp  bool
 
 	selecting bool
 	selStart  int
@@ -418,20 +475,23 @@ var (
 	selectionStyle       = lipgloss.NewStyle().Reverse(true)
 	runningStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	failedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	errorBadgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )
 
 func newModel(cfg Config) *model {
 	if cfg.UI.WheelLines <= 0 {
 		cfg.UI.WheelLines = 3
 	}
-	m := &model{cfg: cfg, selected: -1, follow: true, selStart: -1, selEnd: -1, refreshCh: make(chan struct{}, 1)}
+	m := &model{cfg: cfg, selected: -1, follow: true, wrap: cfg.UI.WordWrap, selStart: -1, selEnd: -1, refreshCh: make(chan struct{}, 1)}
 	names := make([]string, 0, len(cfg.Processes))
 	for name := range cfg.Processes {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		m.processes = append(m.processes, NewProcess(name, cfg.Processes[name], cfg.UI.MaxLogLines))
+		p := NewProcess(name, cfg.Processes[name], cfg.UI.MaxLogLines)
+		p.detectErrors = cfg.UI.HighlightErrors
+		m.processes = append(m.processes, p)
 		if m.selected == -1 && cfg.Processes[name].Autostart {
 			m.selected = len(m.processes) - 1
 		}
@@ -489,7 +549,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusText = "Web logs: " + msg.url + " (URL copied, browser opened)"
 		}
+	case colorSavedMsg:
+		if msg.err != nil {
+			m.statusText = "Color save failed: " + msg.err.Error()
+		} else if msg.color == "" {
+			m.statusText = fmt.Sprintf("Color removed from %s (saved to YAML)", msg.name)
+		} else {
+			m.statusText = fmt.Sprintf("Color %s set on %s (saved to YAML)", msg.color, msg.name)
+		}
 	case tea.KeyMsg:
+		// Help overlay swallows every key: first press closes it.
+		if m.showHelp {
+			m.showHelp = false
+			return m, nil
+		}
 		switch msg.String() {
 		case "q":
 			return m, m.stopAllCmd()
@@ -561,6 +634,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				target = webLogsURL(ws.Addr(), p.Name)
 			}
 			return m, m.openWebCmd(target)
+		case "W":
+			m.wrap = !m.wrap
+			if m.follow {
+				m.scrollToBottom()
+			}
+			if m.wrap {
+				m.statusText = "Word wrap on"
+			} else {
+				m.statusText = "Word wrap off"
+			}
+		case "c":
+			return m, m.cycleColorCmd()
+		case "?":
+			m.showHelp = true
 		case "pgup":
 			m.scrollLogs(-m.visibleLogLines())
 		case "pgdown":
@@ -639,15 +726,52 @@ func (m *model) View() string {
 	rightWidth := max(20, m.width-leftWidth-1)
 	bodyHeight := max(5, m.height-2)
 
+	if m.showHelp {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
+	}
+
 	left := panelStyle.Width(leftWidth - 3).Height(bodyHeight - 2).Render(m.processList())
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • space mark • m mark all • wheel scroll • drag copy • G bottom • q quit")
+	footer := mutedStyle.Render("? help • q quit")
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
 	return body + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
+}
+
+// helpView is the full key reference; the footer only advertises `?` so it
+// never overflows narrow terminals.
+func (m *model) helpView() string {
+	rows := [][2]string{
+		{"↑/k ↓/j", "select process"},
+		{"enter", "start"},
+		{"s", "stop"},
+		{"r", "restart"},
+		{"f", "free port"},
+		{"space", "mark selected"},
+		{"m", "mark all running"},
+		{"W", "toggle word wrap"},
+		{"c", "cycle color (saved to YAML)"},
+		{"w", "web log viewer on/off"},
+		{"wheel", "scroll logs"},
+		{"drag", "select lines (copy)"},
+		{"pgup/pgdn", "page logs"},
+		{"G / end", "follow bottom"},
+		{"esc", "clear selection"},
+		{"q / ctrl+c", "quit"},
+	}
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Keys"))
+	b.WriteString("\n\n")
+	for _, row := range rows {
+		pad := max(1, 12-ansi.StringWidth(row[0]))
+		b.WriteString(row[0] + strings.Repeat(" ", pad) + row[1] + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("press any key to close"))
+	return panelStyle.Render(b.String())
 }
 
 func (m *model) processList() string {
@@ -659,14 +783,19 @@ func (m *model) processList() string {
 		status := string(processStatus)
 		name := sanitizeLogLine(p.Name)
 		statusRendered := status
-		if processStatus == StatusRunning {
+		// Error badge: detected error lines turn the status orange with a "!"
+		// even while running; a real failed status stays red.
+		if errs := p.Errors(); errs > 0 && processStatus != StatusFailed {
+			status += "!"
+			statusRendered = errorBadgeStyle.Render(status)
+		} else if processStatus == StatusRunning {
 			statusRendered = runningStyle.Render(status)
 		} else if processStatus == StatusFailed {
 			statusRendered = failedStyle.Render(status)
 		}
 		dot := ""
 		dotWidth := 0
-		if c := p.Config.Color; c != "" {
+		if c := p.Color(); c != "" {
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("●") + " "
 			dotWidth = 2
 		}
@@ -690,22 +819,28 @@ func (m *model) logView() string {
 	if p == nil {
 		return "No processes configured"
 	}
-	logs := p.Logs()
+	vis := m.visualLines(p.Logs(), m.logWidth())
 	visibleLines := m.visibleLogLines()
-	maxOffset := max(0, len(logs)-visibleLines)
+	maxOffset := max(0, len(vis)-visibleLines)
 	m.logOffset = clamp(m.logOffset, 0, maxOffset)
-	end := min(len(logs), m.logOffset+visibleLines)
+	end := min(len(vis), m.logOffset+visibleLines)
 
 	var b strings.Builder
 	title := fmt.Sprintf("Logs: %s [%s]", sanitizeLogLine(p.Name), p.Status())
+	if errs := p.Errors(); errs > 0 {
+		title += fmt.Sprintf(" — %d error line(s); space clears", errs)
+	}
+	if m.wrap {
+		title += " — wrap"
+	}
 	if !m.follow {
 		title += " — paused; press G for bottom"
 	}
-	b.WriteString(titleStyle.Render(title))
+	b.WriteString(titleStyle.Render(truncate(title, m.logWidth())))
 	b.WriteByte('\n')
 	for i := m.logOffset; i < end; i++ {
-		line := truncate(logs[i], max(10, m.width-m.leftWidth()-6))
-		if m.isSelected(i) {
+		line := vis[i].text
+		if m.isSelected(vis[i].idx) {
 			line = selectionStyle.Render(line)
 		}
 		b.WriteString(line)
@@ -714,6 +849,38 @@ func (m *model) logView() string {
 		}
 	}
 	return b.String()
+}
+
+// visLine is one rendered log row: with wrap on, a long log line becomes
+// several rows that all share the same logical index (used by selection).
+type visLine struct {
+	text string
+	idx  int
+}
+
+func (m *model) visualLines(logs []string, width int) []visLine {
+	out := make([]visLine, 0, len(logs))
+	for i, line := range logs {
+		if !m.wrap || ansi.StringWidth(line) <= width {
+			out = append(out, visLine{text: truncate(line, width), idx: i})
+			continue
+		}
+		for _, part := range strings.Split(ansi.Hardwrap(line, width, true), "\n") {
+			out = append(out, visLine{text: part, idx: i})
+		}
+	}
+	return out
+}
+
+func (m *model) logWidth() int { return max(10, m.width-m.leftWidth()-6) }
+
+// totalVisualLines is the scrollable row count for the selected process.
+func (m *model) totalVisualLines() int {
+	p := m.current()
+	if p == nil {
+		return 0
+	}
+	return len(m.visualLines(p.Logs(), m.logWidth()))
 }
 
 func (m *model) current() *Process {
@@ -734,27 +901,35 @@ func (m *model) logHeight() int { return max(3, m.height-5) }
 
 func (m *model) visibleLogLines() int { return max(1, m.logHeight()-1) }
 
+// mouseLogLine maps a screen row to the logical log index under it, going
+// through the wrapped rows so selection works with word wrap on.
 func (m *model) mouseLogLine(y int) int {
-	return max(0, m.logOffset+(y-2))
+	row := max(0, m.logOffset+(y-2))
+	p := m.current()
+	if p == nil {
+		return row
+	}
+	vis := m.visualLines(p.Logs(), m.logWidth())
+	if len(vis) == 0 {
+		return 0
+	}
+	return vis[min(row, len(vis)-1)].idx
 }
 
 func (m *model) scrollLogs(delta int) {
-	p := m.current()
-	if p == nil {
+	if m.current() == nil {
 		return
 	}
-	logs := p.Logs()
-	maxOffset := max(0, len(logs)-m.visibleLogLines())
+	maxOffset := max(0, m.totalVisualLines()-m.visibleLogLines())
 	m.logOffset = clamp(m.logOffset+delta, 0, maxOffset)
 	m.follow = m.logOffset >= maxOffset
 }
 
 func (m *model) scrollToBottom() {
-	p := m.current()
-	if p == nil {
+	if m.current() == nil {
 		return
 	}
-	m.logOffset = max(0, len(p.Logs())-m.visibleLogLines())
+	m.logOffset = max(0, m.totalVisualLines()-m.visibleLogLines())
 }
 
 func (m *model) resetLogView() {
@@ -824,6 +999,31 @@ func (m *model) copySelectionCmd() tea.Cmd {
 			return copiedMsg{lines: 0, err: err}
 		}
 		return copiedMsg{lines: count}
+	}
+}
+
+// colorPresets is the palette the TUI `c` key cycles through and the web
+// selector offers as swatches. "" means no dot.
+var colorPresets = []string{"", "#38bdf8", "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#ef4444", "#f97316", "#f59e0b", "#84cc16", "#22c55e", "#14b8a6"}
+
+// cycleColorCmd moves the selected process to the next preset color and
+// persists it to the YAML config.
+func (m *model) cycleColorCmd() tea.Cmd {
+	p := m.current()
+	if p == nil {
+		return nil
+	}
+	next := colorPresets[1]
+	for i, c := range colorPresets {
+		if c == p.Color() {
+			next = colorPresets[(i+1)%len(colorPresets)]
+			break
+		}
+	}
+	p.SetColor(next)
+	path := m.configPath
+	return func() tea.Msg {
+		return colorSavedMsg{name: p.Name, color: next, err: updateConfigColor(path, p.Name, next)}
 	}
 }
 

@@ -1,4 +1,4 @@
-last_updated: 2026-07-20
+last_updated: 2026-07-22
 
 domain: processes
 description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, and terminal UI.
@@ -54,6 +54,8 @@ rest:
     - name: POST /api/{name}/restart
       path: cmd/stacker/web.go
     - name: POST /api/{name}/mark
+      path: cmd/stacker/web.go
+    - name: POST /api/{name}/color
       path: cmd/stacker/web.go
     - name: POST /api/mark-all
       path: cmd/stacker/web.go

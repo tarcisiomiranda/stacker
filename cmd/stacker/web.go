@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net"
@@ -79,6 +80,7 @@ type processRow struct {
 	NameEscaped string
 	Status      string
 	Color       string
+	Errors      int
 	Current     bool
 }
 
@@ -89,7 +91,8 @@ func (ws *webServer) processRows(current string) []processRow {
 			Name:        p.Name,
 			NameEscaped: url.PathEscape(p.Name),
 			Status:      string(p.Status()),
-			Color:       p.Config.Color,
+			Color:       p.Color(),
+			Errors:      p.Errors(),
 			Current:     p.Name == current,
 		})
 	}
@@ -135,8 +138,11 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		"Name":        p.Name,
 		"NameEscaped": url.PathEscape(p.Name),
 		"Status":      string(p.Status()),
+		"Color":       p.Color(),
+		"Errors":      p.Errors(),
 		"Logs":        logs,
 		"LogNext":     next,
+		"WordWrap":    ws.m.cfg.UI.WordWrap,
 		"Processes":   ws.processRows(p.Name),
 	})
 }
@@ -197,6 +203,32 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// POST /api/{name}/color {"color": "#38bdf8"} — empty color removes it.
+	// Updates the running process (TUI redraws) and rewrites the YAML config.
+	if parts[1] == "color" {
+		var body struct {
+			Color string `json:"color"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		color := strings.TrimSpace(body.Color)
+		if color != "" && !validColor(color) {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("invalid color %q; use hex (#0af, #00aaff) or a CSS color name", color)})
+			return
+		}
+		if err := updateConfigColor(ws.config, p.Name, color); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		p.SetColor(color)
+		ws.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "color": color})
+		return
+	}
+
 	switch parts[1] {
 	case "start":
 		go func() { _ = p.Start(ws.m.notify) }()

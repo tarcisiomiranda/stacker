@@ -13,6 +13,8 @@ ui:
   wheel_lines: 3
   copy_on_release: true
   max_log_lines: 10000
+  word_wrap: false
+  highlight_errors: false
 
 processes:
   process-name:
@@ -36,7 +38,9 @@ processes:
 - `wheel_lines`: non-negative integer. Zero or omission uses the default of `3`.
 - `copy_on_release`: boolean. When `true`, releasing a mouse selection copies it through OSC 52.
 - `max_log_lines`: non-negative integer per process. Zero or omission uses the default of `10000`.
-- Do not add fields other than `wheel_lines`, `copy_on_release`, and `max_log_lines`.
+- `word_wrap`: boolean. Initial word-wrap state for log lines in both the TUI and the web viewer. Either can toggle it at runtime (TUI key `W`, web `wrap` checkbox); the toggle is not written back to the file. Omission means `false` (long lines are truncated in the TUI, horizontally scrolled in the web viewer).
+- `highlight_errors`: boolean. When `true`, each captured output line is matched against built-in error patterns (Python tracebacks/exceptions, Go `panic:`/`fatal error:`, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL`/`CRITICAL` levels). A match turns the process status orange with a `!` badge in the TUI list and the web sidebar even while the process keeps running, and the log title shows the count. The badge clears on restart or when the user inserts a mark (`space`/`m`, or the web Mark buttons). Cost is one regex match per log line, so it is safe to enable on modest machines; omission means `false` (no matching at all).
+- Do not add fields other than `wheel_lines`, `copy_on_release`, `max_log_lines`, `word_wrap`, and `highlight_errors`.
 
 ### Process fields
 
@@ -47,7 +51,7 @@ Each key below `processes` is the process name displayed in the TUI. Names must 
 - `autostart`: optional boolean. Omission means `false`. When `false`, the process is registered in the TUI but does not start until the user (or CLI) starts it.
 - `graceful_timeout`: optional positive Go duration such as `500ms`, `8s`, `2m`, or `1m30s`. Omission means `8s`.
 - `port`: optional TCP port (`1`–`65535`). When set, Stacker frees that port (terminates listeners) before every start/restart so a stray process left by an IDE/AI agent does not block the bind. Omission means no automatic free-port.
-- `color`: optional visual group marker rendered as a colored dot next to the process name in the TUI list and the web sidebar. Hex (`"#0af"`, `"#00aaff"`, quoted — `#` starts a YAML comment) or a CSS color name (`red`). Purely cosmetic; omission renders no dot.
+- `color`: optional visual group marker rendered as a colored dot next to the process name in the TUI list and the web sidebar. Hex (`"#0af"`, `"#00aaff"`, quoted — `#` starts a YAML comment) or a CSS color name (`red`). Purely cosmetic; omission renders no dot. The running app can rewrite this field (TUI key `c` cycles a preset palette; the web viewer has a color selector); both persist the change to this YAML file preserving comments, so do not assume the file is static while Stacker runs.
 - Do not add any other process fields.
 
 ### Command formatting
@@ -94,7 +98,7 @@ stacker version                          # print binary version (-v, --version)
 
 Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
 
-Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed): `GET /` (process index), `GET /logs/{name}` (HTML page with copy button and auto-refresh), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/mark` (append a timestamped separator to the logs), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs and `m` marks every running process.
+Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed): `GET /` (process index), `GET /logs/{name}` (HTML page with copy button, auto-refresh, wrap toggle, and color selector), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses and colors; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/mark` (append a timestamped separator to the logs), `POST /api/{name}/color` with body `{"color": "#38bdf8"}` (set the process dot color and rewrite it in `stacker.yml`; empty string removes it), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs, `m` marks every running process, `W` toggles word wrap, `c` cycles the selected process's color, and `?` opens the key help overlay.
 
 ### Agent skills (multi-tool)
 

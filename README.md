@@ -87,11 +87,19 @@ You can also start the workflow manually from the Actions tab and provide the de
 
 ## Controls
 
+The footer only shows `? help • q quit`; press `?` for the full key reference overlay.
+
 - `↑/↓` or `j/k`: select a process
 - `Enter`: start
 - `s`: stop
 - `r`: restart
 - `f`: free the configured `port` for the selected process
+- `Space`: insert a timestamped mark separator in the selected process's logs
+- `m`: mark every running process
+- `W`: toggle word wrap for log lines (initial state from `ui.word_wrap`)
+- `c`: cycle the selected process's color dot through a preset palette (saved to the YAML)
+- `w`: toggle the web log viewer
+- `?`: help overlay with all keys
 - mouse wheel: scroll through logs
 - drag with the left mouse button: select lines
 - release the left mouse button: copy the selection (or `Ctrl+C` while selected)
@@ -112,6 +120,10 @@ You should see `Copied N line(s)` in the footer after a successful copy.
 ## YAML process options
 
 ```yaml
+ui:
+  word_wrap: false        # initial wrap state for logs (TUI and web viewer)
+  highlight_errors: false # opt-in: orange badge when output looks like errors
+
 processes:
   backend:
     command: mise run back:dev
@@ -119,9 +131,14 @@ processes:
     autostart: false      # listed in the TUI, but do not start until Enter/CLI
     graceful_timeout: 8s
     port: 8000            # free this TCP port before every start/restart
+    color: "#38bdf8"      # optional dot for visual grouping (TUI + web)
 ```
 
 When `port` is set, Stacker terminates whatever is listening on that port before start. Use this when an IDE or AI agent left an API process bound and `restart` would fail with “address already in use”.
+
+`color` can be changed at runtime: press `c` in the TUI to cycle the palette, or use the color selector in the web log viewer. Both write the new value back to the YAML file, preserving comments and formatting.
+
+With `highlight_errors: true`, Stacker matches every captured line against built-in error patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match, the process status turns orange with a `!` badge in the TUI and web viewer — even while the process keeps running — and the log title shows the count. Restarting or inserting a mark (`space`) clears the badge. The check is one regex per log line and only runs when enabled, so the overhead is negligible.
 
 ## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, …)
 

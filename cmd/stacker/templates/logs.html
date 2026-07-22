@@ -20,8 +20,8 @@ pre { overflow: auto; }
     <div class="flex items-stretch hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
       <a href="/logs/{{.NameEscaped}}"
          class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
-        <span class="truncate flex items-center gap-1.5">{{if .Color}}<span class="inline-block size-2 rounded-full shrink-0" style="background: {{.Color}}"></span>{{end}}{{.Name}}</span>
-        <span data-pstatus="{{.Name}}" class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+        <span class="truncate flex items-center gap-1.5"><span data-pcolor="{{.Name}}" class="inline-block size-2 rounded-full shrink-0{{if not .Color}} hidden{{end}}" style="background: {{.Color}}"></span>{{.Name}}</span>
+        <span data-pstatus="{{.Name}}" class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
       </a>
       <button data-act="restart" data-name="{{.NameEscaped}}" title="restart {{.Name}}"
               class="px-2 text-neutral-500 hover:text-white cursor-pointer">↻</button>
@@ -34,7 +34,7 @@ pre { overflow: auto; }
   <header id="topbar" class="flex items-center gap-4 flex-wrap px-4 py-2 border-b border-neutral-800 bg-neutral-900">
     <h2 class="font-bold">
       {{.Name}}
-      <span data-pstatus-current="{{.Name}}" class="{{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}]</span>
+      <span data-pstatus-current="{{.Name}}" class="{{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}{{if and .Errors (ne .Status "failed")}} ⚠{{.Errors}}{{end}}]</span>
     </h2>
     <button id="copy"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Copy all</button>
@@ -48,18 +48,43 @@ pre { overflow: auto; }
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Stop</button>
     <button data-act="restart" data-name="{{.NameEscaped}}"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Restart</button>
+    <div class="relative" id="color-picker">
+      <button id="color-btn" title="process color (saved to stacker.yml)"
+              class="flex items-center gap-2 px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">
+        <span id="color-dot" class="inline-block size-3 rounded-full border border-neutral-500" style="background: {{.Color}}"></span>
+        Color
+      </button>
+      <div id="color-pop"
+           class="hidden absolute left-0 top-full mt-2 z-20 w-60 p-3 rounded-lg border border-neutral-700 bg-neutral-900 shadow-2xl shadow-black/60">
+        <p class="text-xs text-neutral-400 mb-2">Dot color — saved to YAML</p>
+        <div id="color-swatches" class="grid grid-cols-6 gap-2 mb-3"></div>
+        <div class="flex items-center justify-between gap-2">
+          <label class="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer">
+            <input type="color" id="color-custom" value="#38bdf8"
+                   class="size-6 rounded cursor-pointer border border-neutral-600 bg-transparent p-0">
+            custom
+          </label>
+          <button id="color-none" class="text-xs text-neutral-400 hover:text-white cursor-pointer">remove</button>
+        </div>
+      </div>
+    </div>
     <label class="select-none flex items-center gap-1.5">
       <input type="checkbox" id="follow" checked class="accent-sky-400">
       auto-refresh <span class="text-neutral-500">(Space freezes)</span>
+    </label>
+    <label class="select-none flex items-center gap-1.5" title="word wrap long lines">
+      <input type="checkbox" id="wrap" {{if .WordWrap}}checked{{end}} class="accent-sky-400">
+      wrap
     </label>
     <span id="frozen" class="hidden text-amber-400">⏸ frozen</span>
     <a href="/logs/{{.NameEscaped}}/raw" class="text-sky-400 hover:underline">raw</a>
     <span id="msg" class="text-neutral-400"></span>
   </header>
-  <pre id="log" class="flex-1 overflow-auto p-4 whitespace-pre-wrap break-all">{{.Logs}}</pre>
+  <pre id="log" class="flex-1 overflow-auto p-4 {{if .WordWrap}}whitespace-pre-wrap break-all{{else}}whitespace-pre{{end}}">{{.Logs}}</pre>
 </main>
 
 <script>
+const currentName = {{.Name}};
 const log = document.getElementById("log");
 const msg = document.getElementById("msg");
 const follow = document.getElementById("follow");
@@ -73,6 +98,72 @@ function syncFrozen() {
 }
 follow.addEventListener("change", syncFrozen);
 
+// Word wrap toggle: wrapped (default from ui.word_wrap) vs horizontal scroll.
+const wrap = document.getElementById("wrap");
+function syncWrap() {
+  log.classList.toggle("whitespace-pre-wrap", wrap.checked);
+  log.classList.toggle("break-all", wrap.checked);
+  log.classList.toggle("whitespace-pre", !wrap.checked);
+}
+wrap.addEventListener("change", syncWrap);
+
+// Color selector: swatch palette + custom picker; POSTs to the server, which
+// updates the TUI dot and rewrites stacker.yml.
+const PALETTE = ["#38bdf8", "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#ef4444",
+                 "#f97316", "#f59e0b", "#84cc16", "#22c55e", "#14b8a6", "#a3a3a3"];
+const colorBtn = document.getElementById("color-btn");
+const colorPop = document.getElementById("color-pop");
+const colorDot = document.getElementById("color-dot");
+const swatches = document.getElementById("color-swatches");
+
+for (const c of PALETTE) {
+  const b = document.createElement("button");
+  b.className = "size-6 rounded-full cursor-pointer border border-neutral-700 " +
+                "hover:scale-110 hover:border-white transition-transform";
+  b.style.background = c;
+  b.title = c;
+  b.addEventListener("click", () => setColor(c));
+  swatches.appendChild(b);
+}
+
+function applyColor(name, color) {
+  for (const dot of document.querySelectorAll(`[data-pcolor="${CSS.escape(name)}"]`)) {
+    dot.style.background = color || "";
+    dot.classList.toggle("hidden", !color);
+  }
+  if (name === currentName) colorDot.style.background = color || "";
+}
+
+async function setColor(color) {
+  colorPop.classList.add("hidden");
+  try {
+    const resp = await fetch("/api/{{.NameEscaped}}/color", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ color }),
+    });
+    const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "failed");
+    applyColor(currentName, d.color);
+    msg.textContent = d.color ? `color ${d.color} saved` : "color removed";
+  } catch (e) {
+    msg.textContent = "color failed: " + e.message;
+  }
+  setTimeout(() => { msg.textContent = ""; }, 2000);
+}
+
+colorBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  colorPop.classList.toggle("hidden");
+});
+document.getElementById("color-custom").addEventListener("change", (e) => setColor(e.target.value));
+document.getElementById("color-none").addEventListener("click", () => setColor(""));
+addEventListener("click", (e) => {
+  if (!colorPop.classList.contains("hidden") && !colorPop.contains(e.target)) {
+    colorPop.classList.add("hidden");
+  }
+});
+
 // Space toggles the freeze so logs stop moving while selecting text to copy.
 // m inserts a separator here; Shift+M marks every running process.
 addEventListener("keydown", (e) => {
@@ -81,6 +172,8 @@ addEventListener("keydown", (e) => {
     e.preventDefault();
     follow.checked = !follow.checked;
     syncFrozen();
+  } else if (e.key === "Escape") {
+    colorPop.classList.add("hidden");
   } else if (e.key === "m") {
     markNow();
   } else if (e.key === "M") {
@@ -150,24 +243,30 @@ document.getElementById("copy").addEventListener("click", async () => {
 let next = {{.LogNext}};
 let polling = false;
 
-const STATUS_CLASSES = ["text-green-400", "text-red-400", "text-neutral-500"];
-function statusClass(s) {
+const STATUS_CLASSES = ["text-green-400", "text-red-400", "text-amber-400", "text-neutral-500"];
+// Errors detected in the output (ui.highlight_errors) win over "running" green;
+// a real failed status stays red.
+function statusClass(s, errs) {
+  if (errs > 0 && s !== "failed") return "text-amber-400";
   return s === "running" ? "text-green-400" : s === "failed" ? "text-red-400" : "text-neutral-500";
 }
 
 function updateStatuses(processes) {
   for (const p of processes || []) {
+    applyColor(p.name, p.color || "");
+    const errs = p.errors || 0;
+    const badge = errs > 0 && p.status !== "failed";
     const el = document.querySelector(`[data-pstatus="${CSS.escape(p.name)}"]`);
     if (el) {
-      el.textContent = p.status;
+      el.textContent = p.status + (badge ? "!" : "");
       el.classList.remove(...STATUS_CLASSES);
-      el.classList.add(statusClass(p.status));
+      el.classList.add(statusClass(p.status, errs));
     }
     const cur = document.querySelector(`[data-pstatus-current="${CSS.escape(p.name)}"]`);
     if (cur) {
-      cur.textContent = "[" + p.status + "]";
+      cur.textContent = "[" + p.status + (badge ? ` ⚠${errs}` : "") + "]";
       cur.classList.remove(...STATUS_CLASSES);
-      cur.classList.add(statusClass(p.status));
+      cur.classList.add(statusClass(p.status, errs));
     }
   }
 }

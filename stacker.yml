@@ -4,6 +4,8 @@ ui:
   wheel_lines: 3
   copy_on_release: true
   max_log_lines: 10000
+  word_wrap: false  # initial log wrap state; toggle with W (TUI) or the web checkbox
+  highlight_errors: false  # opt-in: orange badge on error-looking output lines
 
 processes:
   backend:

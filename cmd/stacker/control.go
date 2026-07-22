@@ -31,6 +31,8 @@ type ProcessInfo struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	Port   int    `json:"port,omitempty"`
+	Color  string `json:"color,omitempty"`
+	Errors int    `json:"errors,omitempty"`
 }
 
 type controlServer struct {
@@ -316,6 +318,8 @@ func processInfo(p *Process) ProcessInfo {
 		Name:   p.Name,
 		Status: string(p.Status()),
 		Port:   p.Config.Port,
+		Color:  p.Color(),
+		Errors: p.Errors(),
 	}
 }
 
