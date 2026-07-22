@@ -28,6 +28,58 @@ func TestFreePortKillsListener(t *testing.T) {
 	})
 }
 
+// TestFreePortKillsSupervisorTree reproduces the mise/npm case: the listener
+// is a child of a supervisor shell in its own process group. freePort must
+// take down the whole group, or the supervisor would respawn the listener.
+func TestFreePortKillsSupervisorTree(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	script := fmt.Sprintf(
+		`python3 -c 'import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",%d));s.listen(1);time.sleep(60)' & wait`,
+		port,
+	)
+	cmd := exec.Command("sh", "-c", script)
+	setProcGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervisor tree: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	defer func() {
+		_ = signalProcessGroup(cmd.Process.Pid, signalKill)
+		<-done
+	}()
+
+	waitFor(t, 3*time.Second, func() bool {
+		pids, err := listenersOnPort(port)
+		return err == nil && len(pids) > 0
+	})
+
+	killed, err := freePort(port)
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
+	}
+	if len(killed) == 0 {
+		t.Fatal("expected at least one killed pid")
+	}
+
+	// The supervisor shell must die with its group, not linger and respawn.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervisor shell still alive after freePort")
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		pids, err := listenersOnPort(port)
+		return err == nil && len(pids) == 0
+	})
+}
+
 func TestFreePortNothingListening(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

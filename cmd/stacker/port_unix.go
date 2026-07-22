@@ -5,10 +5,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os/exec"
 	"regexp"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -92,22 +92,43 @@ func listenersFuser(port int) ([]int, error) {
 	return parsePIDs(combined), nil
 }
 
+// portInUseProbe checks whether anything accepts on the port. A plain TCP
+// dial works on both Linux and macOS (the previous ss-based probe does not
+// exist on macOS).
 func portInUseProbe(port int) bool {
-	// Best-effort: if ss lists the port as listening without pid info.
-	cmd := exec.Command("ss", "-ltn", fmt.Sprintf("sport = :%d", port))
-	out, err := cmd.Output()
-	if err != nil {
-		return false
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 300*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
 	}
-	return strings.Contains(string(out), fmt.Sprintf(":%d", port))
+	return false
 }
 
+// terminatePID terminates the process and, when it lives in its own process
+// group, the whole group — supervisor trees like npm→node or mise→uvicorn
+// hold the port through children, so killing only the listener lets the
+// supervisor respawn it. `kill(-pid)` alone (the previous behavior) misses
+// this: the listener is usually a child, not the group leader, so the group
+// signal failed with ESRCH and only the child died.
 func terminatePID(pid int) error {
-	// Prefer process-group kill so children release the port too.
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	target, group := killTarget(pid)
+
+	signalTarget := func(sig syscall.Signal) error {
+		if group {
+			if err := syscall.Kill(-target, sig); err == nil {
+				return nil
+			}
+		}
+		if err := syscall.Kill(pid, sig); err != nil && err != syscall.ESRCH {
 			return err
 		}
+		return nil
+	}
+
+	if err := signalTarget(syscall.SIGTERM); err != nil {
+		return err
 	}
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
@@ -118,10 +139,18 @@ func terminatePID(pid int) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
+	return signalTarget(syscall.SIGKILL)
+}
+
+// killTarget resolves the real process group of pid. Falls back to the pid
+// itself, and never targets Stacker's own group (that would kill the TUI).
+func killTarget(pid int) (target int, group bool) {
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil || pgid <= 1 {
+		return pid, false
 	}
-	return nil
+	if own, err := syscall.Getpgid(0); err == nil && pgid == own {
+		return pid, false
+	}
+	return pgid, true
 }
