@@ -21,6 +21,7 @@ processes:
     autostart: false
     graceful_timeout: 8s
     port: 8000
+    color: "#0af"
 ```
 
 ### Root fields
@@ -46,6 +47,7 @@ Each key below `processes` is the process name displayed in the TUI. Names must 
 - `autostart`: optional boolean. Omission means `false`. When `false`, the process is registered in the TUI but does not start until the user (or CLI) starts it.
 - `graceful_timeout`: optional positive Go duration such as `500ms`, `8s`, `2m`, or `1m30s`. Omission means `8s`.
 - `port`: optional TCP port (`1`–`65535`). When set, Stacker frees that port (terminates listeners) before every start/restart so a stray process left by an IDE/AI agent does not block the bind. Omission means no automatic free-port.
+- `color`: optional visual group marker rendered as a colored dot next to the process name in the TUI list and the web sidebar. Hex (`"#0af"`, `"#00aaff"`, quoted — `#` starts a YAML comment) or a CSS color name (`red`). Purely cosmetic; omission renders no dot.
 - Do not add any other process fields.
 
 ### Command formatting

@@ -247,6 +247,13 @@ processes:
     command: true
     cwd: ./missing
 `,
+		"invalid color": `
+version: 1
+processes:
+  app:
+    command: true
+    color: "#12345g"
+`,
 		"multiple documents": `
 version: 1
 processes:

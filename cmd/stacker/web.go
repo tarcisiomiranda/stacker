@@ -77,6 +77,7 @@ type processRow struct {
 	Name        string
 	NameEscaped string
 	Status      string
+	Color       string
 	Current     bool
 }
 
@@ -87,6 +88,7 @@ func (ws *webServer) processRows(current string) []processRow {
 			Name:        p.Name,
 			NameEscaped: url.PathEscape(p.Name),
 			Status:      string(p.Status()),
+			Color:       p.Config.Color,
 			Current:     p.Name == current,
 		})
 	}

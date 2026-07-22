@@ -43,6 +43,9 @@ type ProcessConfig struct {
 	GracefulTimeout string `yaml:"graceful_timeout"`
 	// Port, when set, is freed (listeners killed) before each start/restart.
 	Port int `yaml:"port"`
+	// Color, when set, draws a colored dot next to the process name (TUI list
+	// and web sidebar) for visual grouping. Hex (#0af, #00aaff) or CSS name.
+	Color string `yaml:"color"`
 }
 
 type ProcessStatus string
@@ -599,10 +602,16 @@ func (m *model) processList() string {
 		} else if processStatus == StatusFailed {
 			statusRendered = failedStyle.Render(status)
 		}
+		dot := ""
+		dotWidth := 0
+		if c := p.Config.Color; c != "" {
+			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("●") + " "
+			dotWidth = 2
+		}
 		contentWidth := max(1, m.leftWidth()-5)
-		nameWidth := max(1, contentWidth-len(status)-1)
+		nameWidth := max(1, contentWidth-len(status)-1-dotWidth)
 		name = truncate(name, nameWidth)
-		line := name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
+		line := dot + name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
 		if i == m.selected {
 			line = selectedProcessStyle.Render(line)
 		}
@@ -821,6 +830,9 @@ func loadConfig(path string) (Config, error) {
 		if processCfg.Port < 0 || processCfg.Port > 65535 {
 			return Config{}, fmt.Errorf("process %q has invalid port %d", name, processCfg.Port)
 		}
+		if processCfg.Color != "" && !validColor(processCfg.Color) {
+			return Config{}, fmt.Errorf("process %q has invalid color %q; use hex (#0af, #00aaff) or a CSS color name", name, processCfg.Color)
+		}
 		if processCfg.Cwd == "" {
 			processCfg.Cwd = "."
 		}
@@ -947,6 +959,29 @@ func truncate(s string, width int) string {
 		return ""
 	}
 	return ansi.Truncate(s, width, "…")
+}
+
+// validColor accepts #rgb/#rrggbb hex or a plain CSS color name. The value is
+// rendered by both lipgloss and the browser, so keep the grammar tight.
+func validColor(c string) bool {
+	if strings.HasPrefix(c, "#") {
+		hex := c[1:]
+		if len(hex) != 3 && len(hex) != 6 {
+			return false
+		}
+		for _, r := range hex {
+			if !unicode.Is(unicode.ASCII_Hex_Digit, r) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, r := range c {
+		if r > unicode.MaxASCII || !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return len(c) > 0
 }
 
 func sanitizeLogLine(line string) string {
