@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -147,6 +148,84 @@ processes:
 	if !found {
 		t.Fatal("mark separator not appended to logs")
 	}
+
+	// Tail: incremental logs plus statuses of every process.
+	tailResp, err := client.Get("http://" + ws.Addr() + "/api/demo/tail?from=0")
+	if err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	var tail struct {
+		OK        bool          `json:"ok"`
+		From      int           `json:"from"`
+		Next      int           `json:"next"`
+		Lines     []string      `json:"lines"`
+		Processes []ProcessInfo `json:"processes"`
+	}
+	if err := json.NewDecoder(tailResp.Body).Decode(&tail); err != nil {
+		t.Fatalf("decode tail: %v", err)
+	}
+	tailResp.Body.Close()
+	if !tail.OK || tail.Next == 0 || len(tail.Lines) == 0 || len(tail.Processes) != 1 {
+		t.Fatalf("unexpected tail: %+v", tail)
+	}
+	// Asking from the end returns no lines.
+	tailResp2, err := client.Get("http://" + ws.Addr() + fmt.Sprintf("/api/demo/tail?from=%d", tail.Next))
+	if err != nil {
+		t.Fatalf("tail2: %v", err)
+	}
+	var tail2 struct {
+		Lines []string `json:"lines"`
+		Next  int      `json:"next"`
+	}
+	if err := json.NewDecoder(tailResp2.Body).Decode(&tail2); err != nil {
+		t.Fatalf("decode tail2: %v", err)
+	}
+	tailResp2.Body.Close()
+	if len(tail2.Lines) != 0 || tail2.Next != tail.Next {
+		t.Fatalf("expected empty incremental tail, got %+v", tail2)
+	}
+
+	// Start and stop are accepted (async).
+	for _, action := range []string{"start", "stop"} {
+		resp, err := client.Post("http://"+ws.Addr()+"/api/demo/"+action, "", nil)
+		if err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status %d", action, resp.StatusCode)
+		}
+	}
+
+	// Mark-all: only running processes get the separator. Wait for the async
+	// start/stop above to settle before forcing the status.
+	waitFor(t, 3*time.Second, func() bool {
+		st := m.processes[0].Status()
+		return st == StatusStopped || st == StatusFailed
+	})
+	time.Sleep(100 * time.Millisecond)
+	m.processes[0].mu.Lock()
+	m.processes[0].status = StatusRunning
+	m.processes[0].mu.Unlock()
+	before := m.processes[0].LogNext()
+	allResp, err := client.Post("http://"+ws.Addr()+"/api/mark-all", "", nil)
+	if err != nil {
+		t.Fatalf("mark-all: %v", err)
+	}
+	var all struct {
+		OK     bool `json:"ok"`
+		Marked int  `json:"marked"`
+	}
+	if err := json.NewDecoder(allResp.Body).Decode(&all); err != nil {
+		t.Fatalf("decode mark-all: %v", err)
+	}
+	allResp.Body.Close()
+	if !all.OK || all.Marked != 1 || m.processes[0].LogNext() != before+3 {
+		t.Fatalf("unexpected mark-all: %+v next=%d before=%d", all, m.processes[0].LogNext(), before)
+	}
+	m.processes[0].mu.Lock()
+	m.processes[0].status = StatusStopped
+	m.processes[0].mu.Unlock()
 
 	// Restart: accepted for a known process, 404 for unknown.
 	restartResp, err := client.Post("http://"+ws.Addr()+"/api/demo/restart", "", nil)

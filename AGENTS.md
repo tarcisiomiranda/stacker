@@ -94,7 +94,7 @@ stacker version                          # print binary version (-v, --version)
 
 Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
 
-Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed): `GET /` (process index), `GET /logs/{name}` (HTML page with copy button and auto-refresh), `GET /logs/{name}/raw` (plain text), `POST /api/{name}/restart`, and `POST /api/{name}/mark` (append a timestamped separator to the logs). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs.
+Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed): `GET /` (process index), `GET /logs/{name}` (HTML page with copy button and auto-refresh), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/mark` (append a timestamped separator to the logs), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs and `m` marks every running process.
 
 ### Agent skills (multi-tool)
 

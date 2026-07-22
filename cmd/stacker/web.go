@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -115,7 +116,9 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("unknown process %q", name), http.StatusNotFound)
 		return
 	}
-	logs := strings.Join(p.Logs(), "\n")
+	// TailLogs(0) gives lines and the next offset in one consistent snapshot.
+	_, lines, next := p.TailLogs(0)
+	logs := strings.Join(lines, "\n")
 
 	if len(parts) == 2 {
 		if parts[1] != "raw" {
@@ -133,20 +136,29 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		"NameEscaped": url.PathEscape(p.Name),
 		"Status":      string(p.Status()),
 		"Logs":        logs,
+		"LogNext":     next,
 		"Processes":   ws.processRows(p.Name),
 	})
 }
 
-// handleAction runs process actions from the web page:
-// POST /api/{name}/restart and POST /api/{name}/mark.
+// handleAction serves the web page's API:
+// GET  /api/{name}/tail?from=N[&nolines=1]  incremental logs + all statuses
+// POST /api/{name}/{start|stop|restart|mark}
 func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
+	// Global action: POST /api/mark-all marks every running process.
+	if trimmed == "mark-all" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "marked": ws.m.markAllRunning()})
 		return
 	}
-	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
+
+	parts := strings.Split(trimmed, "/")
 	if len(parts) != 2 || parts[0] == "" {
-		http.Error(w, "expected /api/{name}/{restart|mark}", http.StatusBadRequest)
+		http.Error(w, "expected /api/{name}/{tail|start|stop|restart|mark}", http.StatusBadRequest)
 		return
 	}
 	name, err := url.PathUnescape(parts[0])
@@ -159,7 +171,37 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]any{"ok": false, "error": fmt.Sprintf("unknown process %q", name)})
 		return
 	}
+
+	if parts[1] == "tail" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// nolines: statuses only (used while the page is frozen) — no copying.
+		if r.URL.Query().Get("nolines") != "" {
+			writeJSON(w, map[string]any{
+				"ok": true, "next": p.LogNext(), "processes": ws.m.processInfos(),
+			})
+			return
+		}
+		from, _ := strconv.Atoi(r.URL.Query().Get("from"))
+		start, lines, next := p.TailLogs(from)
+		writeJSON(w, map[string]any{
+			"ok": true, "from": start, "next": next, "lines": lines,
+			"processes": ws.m.processInfos(),
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	switch parts[1] {
+	case "start":
+		go func() { _ = p.Start(ws.m.notify) }()
+	case "stop":
+		go func() { _ = p.Stop(ws.m.notify) }()
 	case "restart":
 		p.Restart(ws.m.notify)
 	case "mark":

@@ -103,6 +103,9 @@ type Process struct {
 	status     ProcessStatus
 	logs       []string
 	maxLogs    int
+	// dropped is the absolute index of logs[0]: lines trimmed by the memory
+	// cap. Lets clients tail incrementally with stable absolute offsets.
+	dropped    int
 	generation uint64
 	done       chan struct{}
 }
@@ -138,8 +141,28 @@ func (p *Process) appendLogLocked(line string) {
 	p.logs = append(p.logs, line)
 	if len(p.logs) > p.maxLogs {
 		overflow := len(p.logs) - p.maxLogs
+		p.dropped += overflow
 		p.logs = append([]string(nil), p.logs[overflow:]...)
 	}
+}
+
+// TailLogs returns lines from absolute index `from` on, plus the actual start
+// (>= from when lines were trimmed) and the next absolute index to ask for.
+func (p *Process) TailLogs(from int) (start int, lines []string, next int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	next = p.dropped + len(p.logs)
+	from = clamp(from, p.dropped, next)
+	lines = make([]string, next-from)
+	copy(lines, p.logs[from-p.dropped:])
+	return from, lines, next
+}
+
+// LogNext returns the next absolute log index without copying any lines.
+func (p *Process) LogNext() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dropped + len(p.logs)
 }
 
 func (p *Process) Start(notify func()) error {
@@ -502,6 +525,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p.Mark()
 				m.notify()
 			}
+		case "m":
+			n := m.markAllRunning()
+			m.statusText = fmt.Sprintf("Marked %d running process(es)", n)
 		case "f":
 			if p := m.current(); p != nil && p.Config.Port > 0 {
 				go func(proc *Process) {
@@ -617,7 +643,7 @@ func (m *model) View() string {
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • space mark • wheel scroll • drag copy • G bottom • q quit")
+	footer := mutedStyle.Render("Enter start • s stop • r restart • f free-port • w web logs • space mark • m mark all • wheel scroll • drag copy • G bottom • q quit")
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
@@ -735,6 +761,21 @@ func (m *model) resetLogView() {
 	m.clearSelection()
 	m.follow = true
 	m.scrollToBottom()
+}
+
+// markAllRunning appends the separator to every running process's logs.
+func (m *model) markAllRunning() int {
+	n := 0
+	for _, p := range m.processes {
+		if p.Status() == StatusRunning {
+			p.Mark()
+			n++
+		}
+	}
+	if n > 0 {
+		m.notify()
+	}
+	return n
 }
 
 func (m *model) hasSelection() bool { return m.selStart >= 0 && m.selEnd >= 0 }

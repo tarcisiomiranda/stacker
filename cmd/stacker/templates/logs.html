@@ -21,9 +21,9 @@ pre { overflow: auto; }
       <a href="/logs/{{.NameEscaped}}"
          class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
         <span class="truncate flex items-center gap-1.5">{{if .Color}}<span class="inline-block size-2 rounded-full shrink-0" style="background: {{.Color}}"></span>{{end}}{{.Name}}</span>
-        <span class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
+        <span data-pstatus="{{.Name}}" class="text-xs {{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}</span>
       </a>
-      <button data-restart="{{.NameEscaped}}" title="restart {{.Name}}"
+      <button data-act="restart" data-name="{{.NameEscaped}}" title="restart {{.Name}}"
               class="px-2 text-neutral-500 hover:text-white cursor-pointer">↻</button>
     </div>
     {{end}}
@@ -34,13 +34,19 @@ pre { overflow: auto; }
   <header id="topbar" class="flex items-center gap-4 flex-wrap px-4 py-2 border-b border-neutral-800 bg-neutral-900">
     <h2 class="font-bold">
       {{.Name}}
-      <span class="{{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}]</span>
+      <span data-pstatus-current="{{.Name}}" class="{{if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}]</span>
     </h2>
     <button id="copy"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Copy all</button>
-    <button id="mark" title="insert separator (M)"
+    <button id="mark" title="insert separator (m)"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Mark</button>
-    <button data-restart="{{.NameEscaped}}"
+    <button id="mark-all" title="separator on every running process (Shift+M)"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Mark all</button>
+    <button data-act="start" data-name="{{.NameEscaped}}"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Start</button>
+    <button data-act="stop" data-name="{{.NameEscaped}}"
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Stop</button>
+    <button data-act="restart" data-name="{{.NameEscaped}}"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Restart</button>
     <label class="select-none flex items-center gap-1.5">
       <input type="checkbox" id="follow" checked class="accent-sky-400">
@@ -54,7 +60,6 @@ pre { overflow: auto; }
 </main>
 
 <script>
-const rawURL = "/logs/{{.NameEscaped}}/raw";
 const log = document.getElementById("log");
 const msg = document.getElementById("msg");
 const follow = document.getElementById("follow");
@@ -69,24 +74,39 @@ function syncFrozen() {
 follow.addEventListener("change", syncFrozen);
 
 // Space toggles the freeze so logs stop moving while selecting text to copy.
-// M inserts a separator so everything after it reads as new logs.
+// m inserts a separator here; Shift+M marks every running process.
 addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
   if (e.code === "Space") {
     e.preventDefault();
     follow.checked = !follow.checked;
     syncFrozen();
-  } else if (e.key === "m" || e.key === "M") {
+  } else if (e.key === "m") {
     markNow();
+  } else if (e.key === "M") {
+    markAllNow();
   }
 });
+
+async function markAllNow() {
+  try {
+    const resp = await fetch("/api/mark-all", { method: "POST" });
+    const d = await resp.json();
+    msg.textContent = `marked ${d.marked} running`;
+    poll(true);
+  } catch {
+    msg.textContent = "mark all failed";
+  }
+  setTimeout(() => { msg.textContent = ""; }, 2000);
+}
+document.getElementById("mark-all").addEventListener("click", markAllNow);
 
 const markURL = "/api/{{.NameEscaped}}/mark";
 async function markNow() {
   try {
     await fetch(markURL, { method: "POST" });
     msg.textContent = "marked";
-    refresh(true);
+    poll(true);
   } catch {
     msg.textContent = "mark failed";
   }
@@ -94,18 +114,18 @@ async function markNow() {
 }
 document.getElementById("mark").addEventListener("click", markNow);
 
-document.querySelectorAll("[data-restart]").forEach((btn) => {
+// Start/stop/restart buttons; statuses refresh through the poll, no reload.
+document.querySelectorAll("[data-act]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     try {
-      await fetch("/api/" + btn.dataset.restart + "/restart", { method: "POST" });
-      msg.textContent = "restart sent";
-      // Reload so sidebar/topbar statuses reflect the restart.
-      setTimeout(() => location.reload(), 1000);
+      await fetch("/api/" + btn.dataset.name + "/" + btn.dataset.act, { method: "POST" });
+      msg.textContent = btn.dataset.act + " sent";
     } catch {
-      msg.textContent = "restart failed";
-      btn.disabled = false;
+      msg.textContent = btn.dataset.act + " failed";
     }
+    btn.disabled = false;
+    setTimeout(() => { msg.textContent = ""; }, 2000);
   });
 });
 
@@ -124,18 +144,55 @@ document.getElementById("copy").addEventListener("click", async () => {
   setTimeout(() => { msg.textContent = ""; }, 2000);
 });
 
-async function refresh(force) {
-  if (!follow.checked && !force) return;
-  try {
-    const resp = await fetch(rawURL);
-    if (!resp.ok) return;
-    const text = await resp.text();
-    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
-    log.textContent = text;
-    if (atBottom) log.scrollTop = log.scrollHeight;
-  } catch {}
+// Incremental tail: ask only for lines after `next` (usually an empty
+// response) and piggyback every process status — cheap on CPU and IO.
+// While frozen, only statuses are fetched; the backlog catches up on unfreeze.
+let next = {{.LogNext}};
+let polling = false;
+
+const STATUS_CLASSES = ["text-green-400", "text-red-400", "text-neutral-500"];
+function statusClass(s) {
+  return s === "running" ? "text-green-400" : s === "failed" ? "text-red-400" : "text-neutral-500";
 }
-setInterval(refresh, 2000);
+
+function updateStatuses(processes) {
+  for (const p of processes || []) {
+    const el = document.querySelector(`[data-pstatus="${CSS.escape(p.name)}"]`);
+    if (el) {
+      el.textContent = p.status;
+      el.classList.remove(...STATUS_CLASSES);
+      el.classList.add(statusClass(p.status));
+    }
+    const cur = document.querySelector(`[data-pstatus-current="${CSS.escape(p.name)}"]`);
+    if (cur) {
+      cur.textContent = "[" + p.status + "]";
+      cur.classList.remove(...STATUS_CLASSES);
+      cur.classList.add(statusClass(p.status));
+    }
+  }
+}
+
+async function poll(force) {
+  if (polling) return;
+  polling = true;
+  try {
+    const wantLines = follow.checked || force;
+    const q = wantLines ? `?from=${next}` : "?nolines=1";
+    const resp = await fetch(`/api/{{.NameEscaped}}/tail${q}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    updateStatuses(d.processes);
+    if (wantLines && d.lines && d.lines.length) {
+      const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
+      log.textContent += (log.textContent ? "\n" : "") + d.lines.join("\n");
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    }
+    if (wantLines) next = d.next;
+  } catch {} finally {
+    polling = false;
+  }
+}
+setInterval(poll, 1000);
 log.scrollTop = log.scrollHeight;
 </script>
 </body>
