@@ -209,7 +209,7 @@ func (cs *controlServer) handlePing(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "config": cs.config, "pid": os.Getpid()})
+	writeJSON(w, map[string]any{"ok": true, "config": cs.config, "pid": os.Getpid(), "version": resolveVersion()})
 }
 
 func (cs *controlServer) handleProcesses(w http.ResponseWriter, r *http.Request) {

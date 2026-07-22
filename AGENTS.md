@@ -89,6 +89,7 @@ stacker start backend
 stacker stop backend
 stacker restart backend
 stacker free-port 8000                   # works even without the TUI
+stacker version                          # print binary version (-v, --version)
 ```
 
 Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).

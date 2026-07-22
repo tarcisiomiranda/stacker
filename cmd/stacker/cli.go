@@ -32,6 +32,13 @@ func runCLI(configPath string, args []string) int {
 	rest := filtered[1:]
 
 	switch cmd {
+	case "version":
+		if jsonOut {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"version": resolveVersion()})
+		} else {
+			fmt.Printf("stacker %s\n", resolveVersion())
+		}
+		return 0
 	case "ping":
 		return cliPing(configPath, jsonOut)
 	case "list", "ls":
@@ -88,6 +95,7 @@ Commands:
   stop <name>          Stop a process
   restart <name>       Stop then start a process
   free-port <port>     Kill whatever is listening on TCP port (no TUI required)
+  version              Print the Stacker version (-v, --version)
 
 Flags:
   -config path         Path to stacker.yml (default: stacker.yml)

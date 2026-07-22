@@ -89,7 +89,7 @@ jobs:
           mkdir -p dist
           mise exec -- go build \
             -trimpath \
-            -ldflags='-s -w' \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "dist/stacker-${GOOS}-${GOARCH}" \
             ./cmd/stacker
 

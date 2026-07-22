@@ -17,7 +17,7 @@ run = "go run ./cmd/stacker -config stacker.yml"
 [tasks.build]
 description = "Build the local binary"
 depends = ["setup"]
-run = "mkdir -p bin && go build -trimpath -ldflags='-s -w' -o bin/stacker ./cmd/stacker"
+run = "mkdir -p bin && go build -trimpath -ldflags=\"-s -w -X main.version=$(git describe --tags --always --dirty)\" -o bin/stacker ./cmd/stacker"
 
 [tasks.install]
 description = "Install Stacker into GOBIN or GOPATH/bin"

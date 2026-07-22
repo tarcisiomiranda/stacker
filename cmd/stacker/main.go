@@ -18,11 +18,47 @@ import (
 	"time"
 	"unicode"
 
+	"runtime/debug"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"gopkg.in/yaml.v3"
 )
+
+// version is stamped by the release build via -ldflags "-X main.version=...".
+var version = "dev"
+
+// resolveVersion falls back to Go build info so `go install` and local builds
+// still report something traceable.
+func resolveVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+		var rev, dirty string
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				if s.Value == "true" {
+					dirty = "-dirty"
+				}
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "dev+" + rev + dirty
+		}
+	}
+	return version
+}
 
 type Config struct {
 	Version   int                      `yaml:"version"`
@@ -903,6 +939,8 @@ func parseArgs(args []string) (configPath string, rest []string) {
 		case a == "-h" || a == "--help":
 			// bare help without subcommand → CLI help when no TUI intent
 			rest = append(rest, "help")
+		case a == "-v" || a == "--version" || a == "-version":
+			rest = append(rest, "version")
 		case a == "-config" || a == "--config":
 			if i+1 < len(args) {
 				i++
