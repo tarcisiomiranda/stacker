@@ -36,11 +36,11 @@ type ProcessInfo struct {
 }
 
 type controlServer struct {
-	m        *model
-	config   string
+	m         *model
+	config    string
 	statePath string
-	server   *http.Server
-	listener net.Listener
+	server    *http.Server
+	listener  net.Listener
 }
 
 func runtimeDir() (string, error) {
@@ -297,7 +297,7 @@ func (cs *controlServer) handleFreePort(w http.ResponseWriter, r *http.Request) 
 }
 
 func (m *model) processByName(name string) *Process {
-	for _, p := range m.processes {
+	for _, p := range m.procs() {
 		if p.Name == name {
 			return p
 		}
@@ -306,8 +306,9 @@ func (m *model) processByName(name string) *Process {
 }
 
 func (m *model) processInfos() []ProcessInfo {
-	out := make([]ProcessInfo, 0, len(m.processes))
-	for _, p := range m.processes {
+	procs := m.procs()
+	out := make([]ProcessInfo, 0, len(procs))
+	for _, p := range procs {
 		out = append(out, processInfo(p))
 	}
 	return out

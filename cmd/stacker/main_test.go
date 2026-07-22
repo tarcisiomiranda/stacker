@@ -214,6 +214,175 @@ processes:
 	}
 }
 
+func TestLoadConfigKeepsYAMLOrder(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  zeta:
+    command: echo ok
+  alpha:
+    command: echo ok
+  midway:
+    command: echo ok
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	want := []string{"zeta", "alpha", "midway"}
+	m := newModel(cfg)
+	for i, name := range want {
+		if m.processes[i].Name != name {
+			t.Fatalf("expected order %v, got %q at %d", want, m.processes[i].Name, i)
+		}
+	}
+}
+
+func TestUpdateConfigOrderMovesBlocksWithComments(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+
+# UI tuning
+ui:
+  wheel_lines: 3
+
+processes:
+  # backend service
+  api:
+    command: echo api
+    graceful_timeout: 1s
+
+  web:
+    command: echo web
+    color: "#0af"
+
+  # demo generator
+  demo:
+    command: echo demo
+`)
+
+	if err := updateConfigOrder(path, []string{"demo", "api", "web"}); err != nil {
+		t.Fatalf("update order: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(data)
+	demoAt := strings.Index(text, "demo:")
+	apiAt := strings.Index(text, "api:")
+	webAt := strings.Index(text, "web:")
+	if !(demoAt < apiAt && apiAt < webAt) {
+		t.Fatalf("expected demo < api < web in file:\n%s", text)
+	}
+	// Comments must travel with their process; blank separators must survive.
+	if !strings.Contains(text, "# demo generator\n  demo:") {
+		t.Fatalf("demo comment did not move with its block:\n%s", text)
+	}
+	if !strings.Contains(text, "# backend service\n  api:") {
+		t.Fatalf("api comment lost:\n%s", text)
+	}
+	if !strings.Contains(text, "# UI tuning") || !strings.Contains(text, "\n\nprocesses:") {
+		t.Fatalf("unrelated formatting changed:\n%s", text)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("reordered config must still load: %v", err)
+	}
+	want := []string{"demo", "api", "web"}
+	for i, name := range want {
+		if cfg.processOrder[i] != name {
+			t.Fatalf("expected order %v, got %v", want, cfg.processOrder)
+		}
+	}
+}
+
+func TestUpdateConfigOrderRejectsBadPermutation(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+  web:
+    command: echo ok
+`)
+	for _, names := range [][]string{
+		{"api"},
+		{"api", "api"},
+		{"api", "missing"},
+	} {
+		if err := updateConfigOrder(path, names); err == nil {
+			t.Fatalf("expected rejection for %v", names)
+		}
+	}
+}
+
+func TestUpdateConfigUIFlag(t *testing.T) {
+	t.Run("replaces existing keeping comment", func(t *testing.T) {
+		path := writeConfig(t, t.TempDir(), `
+version: 1
+ui:
+  highlight_errors: false  # opt-in badge
+processes:
+  api:
+    command: echo ok
+`)
+		if err := updateConfigUIFlag(path, "highlight_errors", true); err != nil {
+			t.Fatalf("update flag: %v", err)
+		}
+		data, _ := os.ReadFile(path)
+		if !strings.Contains(string(data), "highlight_errors: true  # opt-in badge") {
+			t.Fatalf("expected replaced line with comment:\n%s", data)
+		}
+	})
+
+	t.Run("adds key to existing ui section", func(t *testing.T) {
+		path := writeConfig(t, t.TempDir(), `
+version: 1
+ui:
+  wheel_lines: 3
+
+processes:
+  api:
+    command: echo ok
+`)
+		if err := updateConfigUIFlag(path, "highlight_errors", true); err != nil {
+			t.Fatalf("update flag: %v", err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatalf("config must still load: %v", err)
+		}
+		if !cfg.UI.HighlightErrors {
+			t.Fatal("expected highlight_errors true")
+		}
+		if cfg.UI.WheelLines != 3 {
+			t.Fatal("wheel_lines lost")
+		}
+	})
+
+	t.Run("creates ui section when missing", func(t *testing.T) {
+		path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+`)
+		if err := updateConfigUIFlag(path, "highlight_errors", true); err != nil {
+			t.Fatalf("update flag: %v", err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatalf("config must still load: %v", err)
+		}
+		if !cfg.UI.HighlightErrors {
+			t.Fatal("expected highlight_errors true")
+		}
+	})
+}
+
 func TestErrorDetectionCountsAndMarkClears(t *testing.T) {
 	p := NewProcess("test", ProcessConfig{}, 100)
 	p.detectErrors = true

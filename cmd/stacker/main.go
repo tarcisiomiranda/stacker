@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -65,6 +66,10 @@ type Config struct {
 	Version   int                      `yaml:"version"`
 	UI        UIConfig                 `yaml:"ui"`
 	Processes map[string]ProcessConfig `yaml:"processes"`
+
+	// processOrder is the key order of the processes mapping in the YAML
+	// file; it defines the display order in the TUI and web viewer.
+	processOrder []string
 }
 
 type UIConfig struct {
@@ -107,14 +112,14 @@ type Process struct {
 	Name   string
 	Config ProcessConfig
 
-	// detectErrors mirrors ui.highlight_errors; set once at startup.
+	mu sync.Mutex
+	// detectErrors mirrors ui.highlight_errors; toggled at runtime via the
+	// web checkbox (SetDetectErrors).
 	detectErrors bool
-
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	status     ProcessStatus
-	logs       []string
-	maxLogs    int
+	cmd          *exec.Cmd
+	status       ProcessStatus
+	logs         []string
+	maxLogs      int
 	// errCount is the number of error-looking output lines since the last
 	// start or mark (mark = user acknowledged them).
 	errCount int
@@ -162,6 +167,17 @@ func (p *Process) Errors() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.errCount
+}
+
+// SetDetectErrors toggles error detection at runtime (web checkbox). Turning
+// it off also clears the current badge.
+func (p *Process) SetDetectErrors(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.detectErrors = on
+	if !on {
+		p.errCount = 0
+	}
 }
 
 func (p *Process) Logs() []string {
@@ -445,6 +461,7 @@ type colorSavedMsg struct {
 	color string
 	err   error
 }
+type orderSavedMsg struct{ err error }
 
 type model struct {
 	cfg       Config
@@ -465,6 +482,46 @@ type model struct {
 	refreshCh  chan struct{}
 	configPath string
 	web        *webServer
+
+	// procsMu guards the processes slice reference: the TUI goroutine swaps
+	// it on reorder while web/control handlers iterate it.
+	procsMu sync.RWMutex
+	// pendingOrder is a reorder requested by the web viewer, applied by the
+	// TUI goroutine on the next refresh (it owns `selected`).
+	pendingMu    sync.Mutex
+	pendingOrder []string
+	// hlErr mirrors ui.highlight_errors; toggled at runtime from the web.
+	hlErr atomic.Bool
+}
+
+// orderedNames returns the display order: the YAML key order when known,
+// alphabetical otherwise.
+func orderedNames(cfg Config) []string {
+	if len(cfg.processOrder) == len(cfg.Processes) {
+		ok := true
+		for _, name := range cfg.processOrder {
+			if _, exists := cfg.Processes[name]; !exists {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return cfg.processOrder
+		}
+	}
+	names := make([]string, 0, len(cfg.Processes))
+	for name := range cfg.Processes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// procs returns the current process list; safe from any goroutine.
+func (m *model) procs() []*Process {
+	m.procsMu.RLock()
+	defer m.procsMu.RUnlock()
+	return m.processes
 }
 
 var (
@@ -483,11 +540,8 @@ func newModel(cfg Config) *model {
 		cfg.UI.WheelLines = 3
 	}
 	m := &model{cfg: cfg, selected: -1, follow: true, wrap: cfg.UI.WordWrap, selStart: -1, selEnd: -1, refreshCh: make(chan struct{}, 1)}
-	names := make([]string, 0, len(cfg.Processes))
-	for name := range cfg.Processes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	m.hlErr.Store(cfg.UI.HighlightErrors)
+	names := orderedNames(cfg)
 	for _, name := range names {
 		p := NewProcess(name, cfg.Processes[name], cfg.UI.MaxLogLines)
 		p.detectErrors = cfg.UI.HighlightErrors
@@ -530,10 +584,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case refreshMsg:
+		m.applyPendingOrder()
 		if m.follow {
 			m.scrollToBottom()
 		}
 		return m, m.waitRefresh()
+	case orderSavedMsg:
+		if msg.err != nil {
+			m.statusText = "Order save failed: " + msg.err.Error()
+		} else {
+			m.statusText = "Order saved to YAML"
+		}
 	case copiedMsg:
 		switch {
 		case msg.err != nil:
@@ -634,6 +695,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				target = webLogsURL(ws.Addr(), p.Name)
 			}
 			return m, m.openWebCmd(target)
+		case "shift+up", "K":
+			return m, m.moveSelectedCmd(-1)
+		case "shift+down", "J":
+			return m, m.moveSelectedCmd(1)
 		case "W":
 			m.wrap = !m.wrap
 			if m.follow {
@@ -746,6 +811,7 @@ func (m *model) View() string {
 func (m *model) helpView() string {
 	rows := [][2]string{
 		{"↑/k ↓/j", "select process"},
+		{"shift+↑/↓", "move process (saved to YAML)"},
 		{"enter", "start"},
 		{"s", "stop"},
 		{"r", "restart"},
@@ -941,7 +1007,7 @@ func (m *model) resetLogView() {
 // markAllRunning appends the separator to every running process's logs.
 func (m *model) markAllRunning() int {
 	n := 0
-	for _, p := range m.processes {
+	for _, p := range m.procs() {
 		if p.Status() == StatusRunning {
 			p.Mark()
 			n++
@@ -1002,6 +1068,78 @@ func (m *model) copySelectionCmd() tea.Cmd {
 	}
 }
 
+// requestOrder is called by the web server: the reorder is applied by the
+// TUI goroutine on the next refresh, since it owns the selection index.
+func (m *model) requestOrder(names []string) {
+	m.pendingMu.Lock()
+	m.pendingOrder = names
+	m.pendingMu.Unlock()
+	m.notify()
+}
+
+// applyPendingOrder runs on the TUI goroutine (refreshMsg).
+func (m *model) applyPendingOrder() {
+	m.pendingMu.Lock()
+	names := m.pendingOrder
+	m.pendingOrder = nil
+	m.pendingMu.Unlock()
+	if names == nil {
+		return
+	}
+	byName := make(map[string]*Process, len(m.processes))
+	for _, p := range m.processes {
+		byName[p.Name] = p
+	}
+	reordered := make([]*Process, 0, len(m.processes))
+	for _, name := range names {
+		if p := byName[name]; p != nil {
+			reordered = append(reordered, p)
+			delete(byName, name)
+		}
+	}
+	if len(reordered) != len(m.processes) {
+		return
+	}
+	selectedName := ""
+	if p := m.current(); p != nil {
+		selectedName = p.Name
+	}
+	m.procsMu.Lock()
+	m.processes = reordered
+	m.procsMu.Unlock()
+	for i, p := range reordered {
+		if p.Name == selectedName {
+			m.selected = i
+			break
+		}
+	}
+}
+
+// moveSelectedCmd moves the selected process up/down in the list and
+// persists the new order to the YAML config.
+func (m *model) moveSelectedCmd(delta int) tea.Cmd {
+	i := m.selected
+	j := i + delta
+	if i < 0 || i >= len(m.processes) || j < 0 || j >= len(m.processes) {
+		return nil
+	}
+	reordered := make([]*Process, len(m.processes))
+	copy(reordered, m.processes)
+	reordered[i], reordered[j] = reordered[j], reordered[i]
+	m.procsMu.Lock()
+	m.processes = reordered
+	m.procsMu.Unlock()
+	m.selected = j
+	names := make([]string, len(reordered))
+	for k, p := range reordered {
+		names[k] = p.Name
+	}
+	path := m.configPath
+	return func() tea.Msg {
+		return orderSavedMsg{err: updateConfigOrder(path, names)}
+	}
+}
+
 // colorPresets is the palette the TUI `c` key cycles through and the web
 // selector offers as swatches. "" means no dot.
 var colorPresets = []string{"", "#38bdf8", "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#ef4444", "#f97316", "#f59e0b", "#84cc16", "#22c55e", "#14b8a6"}
@@ -1047,7 +1185,7 @@ func (m *model) stopAllCmd() tea.Cmd {
 
 func (m *model) stopAll() {
 	var wg sync.WaitGroup
-	for _, p := range m.processes {
+	for _, p := range m.procs() {
 		wg.Add(1)
 		go func(proc *Process) {
 			defer wg.Done()
@@ -1125,6 +1263,16 @@ func loadConfig(path string) (Config, error) {
 			return Config{}, fmt.Errorf("process %q cwd %q is not a directory", name, processCfg.Cwd)
 		}
 		cfg.Processes[name] = processCfg
+	}
+
+	// Keep the YAML key order: it is the display order everywhere.
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err == nil && len(doc.Content) > 0 {
+		if processes := mappingValue(doc.Content[0], "processes"); processes != nil {
+			for i := 0; i+1 < len(processes.Content); i += 2 {
+				cfg.processOrder = append(cfg.processOrder, processes.Content[i].Value)
+			}
+		}
 	}
 	return cfg, nil
 }

@@ -85,8 +85,9 @@ type processRow struct {
 }
 
 func (ws *webServer) processRows(current string) []processRow {
-	rows := make([]processRow, 0, len(ws.m.processes))
-	for _, p := range ws.m.processes {
+	procs := ws.m.procs()
+	rows := make([]processRow, 0, len(procs))
+	for _, p := range procs {
 		rows = append(rows, processRow{
 			Name:        p.Name,
 			NameEscaped: url.PathEscape(p.Name),
@@ -135,15 +136,17 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = logsTemplate.Execute(w, map[string]any{
-		"Name":        p.Name,
-		"NameEscaped": url.PathEscape(p.Name),
-		"Status":      string(p.Status()),
-		"Color":       p.Color(),
-		"Errors":      p.Errors(),
-		"Logs":        logs,
-		"LogNext":     next,
-		"WordWrap":    ws.m.cfg.UI.WordWrap,
-		"Processes":   ws.processRows(p.Name),
+		"Name":            p.Name,
+		"NameEscaped":     url.PathEscape(p.Name),
+		"Status":          string(p.Status()),
+		"Color":           p.Color(),
+		"Errors":          p.Errors(),
+		"Port":            p.Config.Port,
+		"Logs":            logs,
+		"LogNext":         next,
+		"WordWrap":        ws.m.cfg.UI.WordWrap,
+		"HighlightErrors": ws.m.hlErr.Load(),
+		"Processes":       ws.processRows(p.Name),
 	})
 }
 
@@ -159,6 +162,56 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true, "marked": ws.m.markAllRunning()})
+		return
+	}
+
+	// POST /api/order {"names": [...]} reorders the process list everywhere
+	// (web sidebar, TUI, YAML file). Must be a permutation of all names.
+	if trimmed == "order" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Names []string `json:"names"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		if err := updateConfigOrder(ws.config, body.Names); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		ws.m.requestOrder(body.Names)
+		writeJSON(w, map[string]any{"ok": true, "order": body.Names})
+		return
+	}
+
+	// POST /api/highlight-errors {"enabled": bool} toggles error detection at
+	// runtime and persists ui.highlight_errors in the YAML config.
+	if trimmed == "highlight-errors" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		if err := updateConfigUIFlag(ws.config, "highlight_errors", body.Enabled); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		ws.m.hlErr.Store(body.Enabled)
+		for _, p := range ws.m.procs() {
+			p.SetDetectErrors(body.Enabled)
+		}
+		ws.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "enabled": body.Enabled})
 		return
 	}
 
@@ -239,6 +292,24 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 	case "mark":
 		p.Mark()
 		ws.m.notify()
+	case "free-port":
+		// Same behavior as the TUI `f` key: async, results go to the logs.
+		if p.Config.Port <= 0 {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("process %q has no port configured", p.Name)})
+			return
+		}
+		go func() {
+			killed, err := freePort(p.Config.Port)
+			switch {
+			case err != nil:
+				p.appendLog("[stacker] free-port failed: " + err.Error())
+			case len(killed) == 0:
+				p.appendLog(fmt.Sprintf("[stacker] port %d: nothing listening", p.Config.Port))
+			default:
+				p.appendLog(fmt.Sprintf("[stacker] freed port %d (killed pids=%v)", p.Config.Port, killed))
+			}
+			ws.m.notify()
+		}()
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return

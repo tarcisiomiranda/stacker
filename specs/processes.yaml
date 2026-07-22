@@ -55,7 +55,13 @@ rest:
       path: cmd/stacker/web.go
     - name: POST /api/{name}/mark
       path: cmd/stacker/web.go
+    - name: POST /api/{name}/free-port
+      path: cmd/stacker/web.go
     - name: POST /api/{name}/color
+      path: cmd/stacker/web.go
+    - name: POST /api/order
+      path: cmd/stacker/web.go
+    - name: POST /api/highlight-errors
       path: cmd/stacker/web.go
     - name: POST /api/mark-all
       path: cmd/stacker/web.go

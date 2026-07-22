@@ -90,6 +90,7 @@ You can also start the workflow manually from the Actions tab and provide the de
 The footer only shows `? help • q quit`; press `?` for the full key reference overlay.
 
 - `↑/↓` or `j/k`: select a process
+- `Shift+↑/↓`: move the selected process up/down in the list (saved to the YAML)
 - `Enter`: start
 - `s`: stop
 - `r`: restart
@@ -134,11 +135,13 @@ processes:
     color: "#38bdf8"      # optional dot for visual grouping (TUI + web)
 ```
 
-When `port` is set, Stacker terminates whatever is listening on that port before start. Use this when an IDE or AI agent left an API process bound and `restart` would fail with “address already in use”.
+When `port` is set, Stacker terminates whatever is listening on that port before start. Use this when an IDE or AI agent left an API process bound and `restart` would fail with “address already in use”. Free-port targets the listener's whole process group (so supervisor trees like `npm → node` or `mise → uvicorn` go down together instead of respawning the server) and retries a few rounds before reporting the port as still busy.
 
 `color` can be changed at runtime: press `c` in the TUI to cycle the palette, or use the color selector in the web log viewer. Both write the new value back to the YAML file, preserving comments and formatting.
 
-With `highlight_errors: true`, Stacker matches every captured line against built-in error patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match, the process status turns orange with a `!` badge in the TUI and web viewer — even while the process keeps running — and the log title shows the count. Restarting or inserting a mark (`space`) clears the badge. The check is one regex per log line and only runs when enabled, so the overhead is negligible.
+With `highlight_errors: true`, Stacker matches every captured line against built-in error patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match, the process status turns orange with a `!` badge in the TUI and web viewer — even while the process keeps running — and the log title shows the count. Restarting or inserting a mark (`space`) clears the badge. The check is one regex per log line and only runs when enabled, so the overhead is negligible. The web viewer's `error badge` checkbox toggles this at runtime and persists the choice in the YAML.
+
+The order of the keys under `processes:` is the display order in the TUI and web sidebar. Reorder at runtime with `Shift+↑/↓` in the TUI or by dragging processes in the web sidebar — both rewrite `stacker.yml` keeping comments and formatting.
 
 ## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, …)
 
