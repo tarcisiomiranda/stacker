@@ -111,6 +111,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Full history + tags so release.py can build the changelog from
+          # commit messages since the previous tag.
+          fetch-depth: 0
 
       - name: Install Python
         uses: jdx/mise-action@v4

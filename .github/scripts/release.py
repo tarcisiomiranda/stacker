@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,100 @@ class GitHubAPI:
             raise RuntimeError(f"Asset upload failed: {error.reason}") from error
 
 
+CHANGELOG_SECTIONS = (
+    ("feat", "### Features"),
+    ("fix", "### Fixes"),
+    ("", "### Other changes"),
+)
+CONVENTIONAL_PREFIX = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?!?:\s*(?P<subject>.+)$")
+
+
+def git_output(*args: str) -> str:
+    """Run a git command and return its stdout."""
+    result = subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    return result.stdout
+
+
+def changelog_commits(tag: str) -> tuple[str | None, list[str]]:
+    """Return the previous SemVer tag and commit subjects since it.
+
+    When `tag` already exists, the range ends at the tag; otherwise (a
+    workflow_dispatch run that names a new tag) it ends at HEAD.
+    """
+    tags = [
+        line.strip()
+        for line in git_output("tag", "--sort=-v:refname").splitlines()
+        if TAG_PATTERN.fullmatch(line.strip())
+    ]
+    if tag in tags:
+        end = tag
+        newer = tags[tags.index(tag) + 1 :]
+        previous = newer[0] if newer else None
+    else:
+        end = "HEAD"
+        previous = tags[0] if tags else None
+
+    log_range = f"{previous}..{end}" if previous else end
+    subjects = [
+        line.strip()
+        for line in git_output(
+            "log", "--no-merges", "--pretty=format:%s", log_range
+        ).splitlines()
+        if line.strip()
+    ]
+    return previous, subjects
+
+
+def build_release_body(
+    subjects: list[str],
+    previous: str | None,
+    tag: str,
+    repository: str,
+) -> str | None:
+    """Build Markdown release notes from conventional commit subjects."""
+    if not subjects:
+        return None
+
+    grouped: dict[str, list[str]] = {prefix: [] for prefix, _ in CHANGELOG_SECTIONS}
+    for subject in subjects:
+        matched = CONVENTIONAL_PREFIX.match(subject)
+        commit_type = matched.group("type") if matched else ""
+        text = matched.group("subject") if matched else subject
+        bucket = commit_type if commit_type in dict(CHANGELOG_SECTIONS) else ""
+        grouped[bucket].append(text)
+
+    lines = ["## What's new"]
+    for prefix, heading in CHANGELOG_SECTIONS:
+        if not grouped[prefix]:
+            continue
+        lines.append("")
+        lines.append(heading)
+        lines.extend(f"- {text}" for text in grouped[prefix])
+
+    if previous:
+        lines.append("")
+        lines.append(
+            f"**Full changelog**: https://github.com/{repository}/compare/{previous}...{tag}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def release_notes(tag: str, repository: str) -> str | None:
+    """Generate release notes from commit messages; never fail the release."""
+    try:
+        previous, subjects = changelog_commits(tag)
+        return build_release_body(subjects, previous, tag, repository)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"WARNING: could not build changelog from commits: {error}", file=sys.stderr)
+        return None
+
+
 def validate_tag(tag: str) -> str:
     """Validate and return a SemVer release tag."""
     if not TAG_PATTERN.fullmatch(tag):
@@ -161,6 +256,7 @@ def create_or_get_release(
     repository: str,
     tag: str,
     target_commitish: str,
+    body: str | None = None,
 ) -> dict[str, Any]:
     """Return an existing release or create a new one."""
     releases_url = f"{api.api_url}/repos/{repository}/releases"
@@ -182,8 +278,11 @@ def create_or_get_release(
         "name": tag,
         "draft": False,
         "prerelease": prerelease,
-        "generate_release_notes": True,
+        # Without a commit-based body, fall back to GitHub's generated notes.
+        "generate_release_notes": body is None,
     }
+    if body is not None:
+        payload["body"] = body
     created = api.request_json("POST", releases_url, payload)
     if not isinstance(created, dict):
         raise RuntimeError("GitHub returned an invalid release response")
@@ -236,8 +335,9 @@ def publish_release() -> None:
         raise RuntimeError("GITHUB_TOKEN is required")
 
     assets = collect_and_verify_assets(Path("release"))
+    body = release_notes(tag, repository)
     api = GitHubAPI(token, api_url)
-    release = create_or_get_release(api, repository, tag, target_commitish)
+    release = create_or_get_release(api, repository, tag, target_commitish, body)
     replace_assets(api, repository, release, assets)
     print(f"Release published successfully: {tag}")
 
