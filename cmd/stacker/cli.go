@@ -73,6 +73,18 @@ func runCLI(configPath string, args []string) int {
 			return 2
 		}
 		return cliFreePort(configPath, rest[0], jsonOut)
+	case "tasks":
+		name := ""
+		if len(rest) > 0 {
+			name = rest[0]
+		}
+		return cliTasks(configPath, name, jsonOut)
+	case "run":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: stacker run <process> <task>")
+			return 2
+		}
+		return cliRun(configPath, rest[0], rest[1], jsonOut)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		printCLIHelp()
@@ -95,6 +107,8 @@ Commands:
   stop <name>          Stop a process
   restart <name>       Stop then start a process
   free-port <port>     Kill whatever is listening on TCP port (no TUI required)
+  tasks [name]         List one-shot tasks (all processes, or one by name)
+  run <proc> <task>    Run a one-shot task in a process (output goes to its log)
   version              Print the Stacker version (-v, --version)
 
 Flags:
@@ -106,7 +120,97 @@ Examples:
   stacker list --json
   stacker restart backend
   stacker free-port 8000
+  stacker run backend migrate
 `)
+}
+
+func cliTasks(configPath, name string, jsonOut bool) int {
+	client, _, err := newControlClient(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	var resp struct {
+		OK        bool          `json:"ok"`
+		Error     string        `json:"error"`
+		Processes []ProcessInfo `json:"processes"`
+	}
+	if err := client.get("/v1/processes", &resp); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if !resp.OK && resp.Error != "" {
+		fmt.Fprintln(os.Stderr, "error:", resp.Error)
+		return 1
+	}
+	filtered := resp.Processes
+	if name != "" {
+		filtered = nil
+		for _, p := range resp.Processes {
+			if p.Name == name {
+				filtered = append(filtered, p)
+			}
+		}
+		if filtered == nil {
+			fmt.Fprintf(os.Stderr, "error: unknown process %q\n", name)
+			return 1
+		}
+	}
+	if jsonOut {
+		out := map[string]any{}
+		for _, p := range filtered {
+			out[p.Name] = p.Tasks
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "tasks": out})
+		return 0
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "PROCESS\tTASK")
+	any := false
+	for _, p := range filtered {
+		for _, t := range p.Tasks {
+			fmt.Fprintf(w, "%s\t%s\n", p.Name, t)
+			any = true
+		}
+	}
+	_ = w.Flush()
+	if !any {
+		fmt.Println("no tasks configured")
+	}
+	return 0
+}
+
+func cliRun(configPath, proc, task string, jsonOut bool) int {
+	client, _, err := newControlClient(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	var resp struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Process string `json:"process"`
+		Task    string `json:"task"`
+	}
+	path := "/v1/tasks/" + proc + "/" + task
+	if err := client.post(path, nil, &resp); err != nil {
+		if resp.Error != "" {
+			fmt.Fprintln(os.Stderr, "error:", resp.Error)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	if !resp.OK {
+		fmt.Fprintln(os.Stderr, "error:", resp.Error)
+		return 1
+	}
+	if jsonOut {
+		_ = json.NewEncoder(os.Stdout).Encode(resp)
+		return 0
+	}
+	fmt.Printf("run %s → task %s started (output in the process log)\n", proc, task)
+	return 0
 }
 
 func cliPing(configPath string, jsonOut bool) int {

@@ -28,11 +28,12 @@ type InstanceState struct {
 
 // ProcessInfo is the JSON shape returned by the control API and CLI.
 type ProcessInfo struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Port   int    `json:"port,omitempty"`
-	Color  string `json:"color,omitempty"`
-	Errors int    `json:"errors,omitempty"`
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	Port   int      `json:"port,omitempty"`
+	Color  string   `json:"color,omitempty"`
+	Errors int      `json:"errors,omitempty"`
+	Tasks  []string `json:"tasks,omitempty"`
 }
 
 type controlServer struct {
@@ -169,6 +170,7 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 	mux.HandleFunc("/v1/processes", cs.handleProcesses)
 	mux.HandleFunc("/v1/processes/", cs.handleProcessAction)
 	mux.HandleFunc("/v1/free-port", cs.handleFreePort)
+	mux.HandleFunc("/v1/tasks/", cs.handleTaskAction)
 
 	cs.server = &http.Server{Handler: mux}
 
@@ -276,6 +278,30 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// handleTaskAction runs a one-shot task: POST /v1/tasks/{proc}/{task}.
+func (cs *controlServer) handleTaskAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		http.Error(w, "expected /v1/tasks/{process}/{task}", http.StatusBadRequest)
+		return
+	}
+	p := cs.m.processByName(parts[0])
+	if p == nil {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"ok": false, "error": fmt.Sprintf("unknown process %q", parts[0])})
+		return
+	}
+	if err := p.RunTask(parts[1], cs.m.notify); err != nil {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "process": parts[0], "task": parts[1]})
+}
+
 func (cs *controlServer) handleFreePort(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -321,6 +347,7 @@ func processInfo(p *Process) ProcessInfo {
 		Port:   p.Config.Port,
 		Color:  p.Color(),
 		Errors: p.Errors(),
+		Tasks:  sortedTaskNames(p.Config.Tasks),
 	}
 }
 

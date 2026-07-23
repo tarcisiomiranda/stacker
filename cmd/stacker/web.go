@@ -72,7 +72,22 @@ func (ws *webServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = indexTemplate.Execute(w, map[string]any{"Config": ws.config, "Processes": ws.processRows("")})
+	_ = indexTemplate.Execute(w, map[string]any{"Config": ws.config, "Processes": ws.processRows(""), "Tasks": ws.taskRows("")})
+}
+
+// taskEntry is one one-shot task rendered as a button on the logs page.
+type taskEntry struct {
+	Name    string
+	Command string
+}
+
+func taskEntries(p *Process) []taskEntry {
+	names := sortedTaskNames(p.Config.Tasks)
+	entries := make([]taskEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, taskEntry{Name: name, Command: p.Config.Tasks[name]})
+	}
+	return entries
 }
 
 type processRow struct {
@@ -82,19 +97,34 @@ type processRow struct {
 	Color       string
 	Errors      int
 	Current     bool
+	IsTask      bool
 }
 
+// processRows returns the service processes; taskRows returns the standalone
+// one-shot tasks. Split so the web sidebar can make only processes draggable.
 func (ws *webServer) processRows(current string) []processRow {
+	return ws.rows(current, false)
+}
+
+func (ws *webServer) taskRows(current string) []processRow {
+	return ws.rows(current, true)
+}
+
+func (ws *webServer) rows(current string, tasks bool) []processRow {
 	procs := ws.m.procs()
 	rows := make([]processRow, 0, len(procs))
 	for _, p := range procs {
+		if p.oneShot != tasks {
+			continue
+		}
 		rows = append(rows, processRow{
 			Name:        p.Name,
 			NameEscaped: url.PathEscape(p.Name),
-			Status:      string(p.Status()),
+			Status:      oneShotStatusLabel(p, p.Status()),
 			Color:       p.Color(),
 			Errors:      p.Errors(),
 			Current:     p.Name == current,
+			IsTask:      p.oneShot,
 		})
 	}
 	return rows
@@ -138,10 +168,13 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 	_ = logsTemplate.Execute(w, map[string]any{
 		"Name":            p.Name,
 		"NameEscaped":     url.PathEscape(p.Name),
-		"Status":          string(p.Status()),
+		"Status":          oneShotStatusLabel(p, p.Status()),
 		"Color":           p.Color(),
 		"Errors":          p.Errors(),
 		"Port":            p.Config.Port,
+		"IsTask":          p.oneShot,
+		"ProcTasks":       taskEntries(p),
+		"Standalone":      ws.taskRows(p.Name),
 		"Logs":            logs,
 		"LogNext":         next,
 		"WordWrap":        ws.m.cfg.UI.WordWrap,
@@ -260,6 +293,10 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 	// POST /api/{name}/color {"color": "#38bdf8"} — empty color removes it.
 	// Updates the running process (TUI redraws) and rewrites the YAML config.
 	if parts[1] == "color" {
+		if p.oneShot {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "color is not editable for standalone tasks"})
+			return
+		}
 		var body struct {
 			Color string `json:"color"`
 		}
@@ -289,6 +326,20 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 		go func() { _ = p.Stop(ws.m.notify) }()
 	case "restart":
 		p.Restart(ws.m.notify)
+	case "task":
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		if err := p.RunTask(body.Name, ws.m.notify); err != nil {
+			writeJSONStatus(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "task": body.Name})
+		return
 	case "mark":
 		p.Mark()
 		ws.m.notify()

@@ -66,10 +66,22 @@ type Config struct {
 	Version   int                      `yaml:"version"`
 	UI        UIConfig                 `yaml:"ui"`
 	Processes map[string]ProcessConfig `yaml:"processes"`
+	// Tasks are standalone one-shot commands, not tied to any process. Each
+	// gets its own entry in the list and its own log; running one executes
+	// the command once and it returns to idle instead of staying up.
+	Tasks map[string]TaskConfig `yaml:"tasks"`
 
-	// processOrder is the key order of the processes mapping in the YAML
-	// file; it defines the display order in the TUI and web viewer.
+	// processOrder / taskOrder are the YAML key orders; they define the
+	// display order in the TUI and web viewer.
 	processOrder []string
+	taskOrder    []string
+}
+
+// TaskConfig is a standalone one-shot command (root-level `tasks:`).
+type TaskConfig struct {
+	Command string `yaml:"command"`
+	Cwd     string `yaml:"cwd"`
+	Color   string `yaml:"color"`
 }
 
 type UIConfig struct {
@@ -96,6 +108,10 @@ type ProcessConfig struct {
 	// Color, when set, draws a colored dot next to the process name (TUI list
 	// and web sidebar) for visual grouping. Hex (#0af, #00aaff) or CSS name.
 	Color string `yaml:"color"`
+	// Tasks are named one-shot commands (migrations, seeds, cache clears) run
+	// on demand in the process's working directory. They stream into the
+	// process log and do not affect its status: the service keeps running.
+	Tasks map[string]string `yaml:"tasks"`
 }
 
 type ProcessStatus string
@@ -111,6 +127,10 @@ const (
 type Process struct {
 	Name   string
 	Config ProcessConfig
+	// oneShot marks a standalone task entry: it is expected to run once and
+	// exit, so a clean exit reads as "idle", not a stopped service, and it is
+	// excluded from process-only features (reorder, color persistence).
+	oneShot bool
 
 	mu sync.Mutex
 	// detectErrors mirrors ui.highlight_errors; toggled at runtime via the
@@ -123,6 +143,9 @@ type Process struct {
 	// errCount is the number of error-looking output lines since the last
 	// start or mark (mark = user acknowledged them).
 	errCount int
+	// runningTasks tracks one-shot tasks in flight so the same task name is
+	// not launched twice concurrently.
+	runningTasks map[string]struct{}
 	// dropped is the absolute index of logs[0]: lines trimmed by the memory
 	// cap. Lets clients tail incrementally with stable absolute offsets.
 	dropped    int
@@ -346,18 +369,25 @@ func (p *Process) startFailedLocked(err error) {
 	p.appendLogLocked("[stacker] start failed: " + err.Error())
 }
 
+// recordLine appends a display line to the log and, when error detection is
+// on, bumps the badge if matchText looks like an error. matchText is the raw
+// content without the stream/task prefix so the prefix never triggers a match.
+func (p *Process) recordLine(display, matchText string) {
+	p.mu.Lock()
+	p.appendLogLocked(display)
+	if p.detectErrors && matchText != "" && errLineRe.MatchString(matchText) {
+		p.errCount++
+	}
+	p.mu.Unlock()
+}
+
 func (p *Process) capture(r io.Reader, stream string, notify func()) {
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		text := sanitizeLogLine(scanner.Text())
-		p.mu.Lock()
-		p.appendLogLocked(fmt.Sprintf("[%s] %s", stream, text))
-		if p.detectErrors && errLineRe.MatchString(text) {
-			p.errCount++
-		}
-		p.mu.Unlock()
+		p.recordLine("["+stream+"] "+text, text)
 		notify()
 	}
 	if err := scanner.Err(); err != nil {
@@ -447,6 +477,114 @@ func (p *Process) Restart(notify func()) {
 	}()
 }
 
+// TaskRunning reports whether the named one-shot task is currently executing.
+func (p *Process) TaskRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, running := p.runningTasks[name]
+	return running
+}
+
+// RunTask launches a named one-shot command in the process's working
+// directory. Output streams into the process log prefixed with the task name;
+// the process status is untouched, so the long-running service keeps running.
+// A second call for a task already in flight is ignored. Returns an error only
+// for an unknown task; execution outcome is reported through the log.
+func (p *Process) RunTask(name string, notify func()) error {
+	p.mu.Lock()
+	command, ok := p.Config.Tasks[name]
+	if !ok {
+		p.mu.Unlock()
+		return fmt.Errorf("unknown task %q for process %q", name, p.Name)
+	}
+	if p.runningTasks == nil {
+		p.runningTasks = map[string]struct{}{}
+	}
+	if _, busy := p.runningTasks[name]; busy {
+		p.mu.Unlock()
+		return nil
+	}
+	p.runningTasks[name] = struct{}{}
+	cwd := p.Config.Cwd
+	if cwd == "" {
+		cwd = "."
+	}
+	p.mu.Unlock()
+
+	go func() {
+		defer func() {
+			p.mu.Lock()
+			delete(p.runningTasks, name)
+			p.mu.Unlock()
+			notify()
+		}()
+
+		prefix := "[task " + name + "] "
+		absCwd, err := filepath.Abs(cwd)
+		if err != nil {
+			p.recordLine(prefix+"failed: "+err.Error(), "error:")
+			notify()
+			return
+		}
+		p.appendLog(prefix + "$ " + command)
+		notify()
+
+		cmd := exec.Command(shellName(), shellRunArg(), command)
+		cmd.Dir = absCwd
+		cmd.Env = os.Environ()
+		setProcGroup(cmd)
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			p.recordLine(prefix+"failed: "+err.Error(), "error:")
+			notify()
+			return
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			p.recordLine(prefix+"failed: "+err.Error(), "error:")
+			notify()
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			p.recordLine(prefix+"start failed: "+err.Error(), "error:")
+			notify()
+			return
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); p.captureTask(name, stdout, notify) }()
+		go func() { defer wg.Done(); p.captureTask(name, stderr, notify) }()
+		wg.Wait()
+
+		if err := cmd.Wait(); err != nil {
+			p.mu.Lock()
+			p.appendLogLocked(prefix + "exited: " + err.Error())
+			if p.detectErrors {
+				p.errCount++
+			}
+			p.mu.Unlock()
+		} else {
+			p.appendLog(prefix + "done")
+		}
+		notify()
+	}()
+	return nil
+}
+
+func (p *Process) captureTask(name string, r io.Reader, notify func()) {
+	scanner := bufio.NewScanner(r)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	prefix := "[task " + name + "] "
+	for scanner.Scan() {
+		text := sanitizeLogLine(scanner.Text())
+		p.recordLine(prefix+text, text)
+		notify()
+	}
+}
+
 type refreshMsg struct{}
 type copiedMsg struct {
 	lines int
@@ -473,6 +611,7 @@ type model struct {
 	follow    bool
 	wrap      bool
 	showHelp  bool
+	showTasks bool
 
 	selecting bool
 	selStart  int
@@ -492,6 +631,10 @@ type model struct {
 	pendingOrder []string
 	// hlErr mirrors ui.highlight_errors; toggled at runtime from the web.
 	hlErr atomic.Bool
+	// numProcesses is the count of real (service) processes at the front of
+	// m.processes; standalone one-shot tasks follow. Reorder and color
+	// persistence apply only to the process prefix.
+	numProcesses int
 }
 
 // orderedNames returns the display order: the YAML key order when known,
@@ -550,10 +693,48 @@ func newModel(cfg Config) *model {
 			m.selected = len(m.processes) - 1
 		}
 	}
+	m.numProcesses = len(m.processes)
+
+	// Standalone one-shot tasks follow the processes, in YAML order.
+	for _, name := range orderedTaskNames(cfg) {
+		tc := cfg.Tasks[name]
+		p := NewProcess(name, ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color}, cfg.UI.MaxLogLines)
+		p.oneShot = true
+		p.detectErrors = cfg.UI.HighlightErrors
+		m.processes = append(m.processes, p)
+	}
+
 	if m.selected == -1 && len(m.processes) > 0 {
 		m.selected = 0
 	}
 	return m
+}
+
+// orderedTaskNames returns the standalone task display order: YAML key order
+// when known, alphabetical otherwise.
+func orderedTaskNames(cfg Config) []string {
+	if len(cfg.taskOrder) == len(cfg.Tasks) {
+		ok := true
+		for _, name := range cfg.taskOrder {
+			if _, exists := cfg.Tasks[name]; !exists {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return cfg.taskOrder
+		}
+	}
+	return sortedTaskConfigNames(cfg.Tasks)
+}
+
+func sortedTaskConfigNames(tasks map[string]TaskConfig) []string {
+	names := make([]string, 0, len(tasks))
+	for name := range tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (m *model) notify() {
@@ -623,6 +804,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showHelp {
 			m.showHelp = false
 			return m, nil
+		}
+		// Task picker: digits run a task, anything else closes it.
+		if m.showTasks {
+			return m, m.handleTaskKey(msg.String())
 		}
 		switch msg.String() {
 		case "q":
@@ -711,6 +896,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			return m, m.cycleColorCmd()
+		case "t":
+			if p := m.current(); p != nil {
+				if len(p.Config.Tasks) == 0 {
+					m.statusText = "No tasks configured for " + p.Name
+				} else {
+					m.showTasks = true
+				}
+			}
 		case "?":
 			m.showHelp = true
 		case "pgup":
@@ -794,6 +987,9 @@ func (m *model) View() string {
 	if m.showHelp {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
 	}
+	if m.showTasks {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.tasksView())
+	}
 
 	left := panelStyle.Width(leftWidth - 3).Height(bodyHeight - 2).Render(m.processList())
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
@@ -812,12 +1008,13 @@ func (m *model) helpView() string {
 	rows := [][2]string{
 		{"↑/k ↓/j", "select process"},
 		{"shift+↑/↓", "move process (saved to YAML)"},
-		{"enter", "start"},
+		{"enter", "start (▶ tasks: run once)"},
 		{"s", "stop"},
 		{"r", "restart"},
 		{"f", "free port"},
 		{"space", "mark selected"},
 		{"m", "mark all running"},
+		{"t", "run a task (one-shot command)"},
 		{"W", "toggle word wrap"},
 		{"c", "cycle color (saved to YAML)"},
 		{"w", "web log viewer on/off"},
@@ -840,14 +1037,87 @@ func (m *model) helpView() string {
 	return panelStyle.Render(b.String())
 }
 
+// sortedTaskNames returns the task names in stable alphabetical order.
+func sortedTaskNames(tasks map[string]string) []string {
+	if len(tasks) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(tasks))
+	for name := range tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// currentTaskNames returns the selected process's task names, sorted, so the
+// picker numbering is stable.
+func (m *model) currentTaskNames() []string {
+	p := m.current()
+	if p == nil {
+		return nil
+	}
+	return sortedTaskNames(p.Config.Tasks)
+}
+
+// tasksView is the one-shot task picker overlay for the selected process.
+func (m *model) tasksView() string {
+	p := m.current()
+	if p == nil {
+		return panelStyle.Render("No process selected")
+	}
+	names := m.currentTaskNames()
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Tasks — " + sanitizeLogLine(p.Name)))
+	b.WriteString("\n\n")
+	for i, name := range names {
+		marker := " "
+		if p.TaskRunning(name) {
+			marker = runningStyle.Render("●")
+		}
+		num := "  "
+		if i < 9 {
+			num = fmt.Sprintf("%d ", i+1)
+		}
+		cmd := truncate(sanitizeLogLine(p.Config.Tasks[name]), 40)
+		b.WriteString(fmt.Sprintf("%s %s %s  %s\n", num, marker, name, mutedStyle.Render(cmd)))
+	}
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("press 1-9 to run • esc to close"))
+	return panelStyle.Render(b.String())
+}
+
+// handleTaskKey interprets a key while the task picker is open: a digit runs
+// the matching task, everything else closes the picker.
+func (m *model) handleTaskKey(key string) tea.Cmd {
+	m.showTasks = false
+	if len(key) != 1 || key[0] < '1' || key[0] > '9' {
+		return nil
+	}
+	idx := int(key[0] - '1')
+	names := m.currentTaskNames()
+	if idx >= len(names) {
+		return nil
+	}
+	p := m.current()
+	name := names[idx]
+	m.statusText = "Running task " + name
+	go func() {
+		if err := p.RunTask(name, m.notify); err != nil {
+			p.appendLog("[stacker] " + err.Error())
+			m.notify()
+		}
+	}()
+	return nil
+}
+
 func (m *model) processList() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Processes"))
 	b.WriteString("\n")
 	for i, p := range m.processes {
 		processStatus := p.Status()
-		status := string(processStatus)
-		name := sanitizeLogLine(p.Name)
+		status := oneShotStatusLabel(p, processStatus)
 		statusRendered := status
 		// Error badge: detected error lines turn the status orange with a "!"
 		// even while running; a real failed status stays red.
@@ -859,16 +1129,23 @@ func (m *model) processList() string {
 		} else if processStatus == StatusFailed {
 			statusRendered = failedStyle.Render(status)
 		}
+		marker := ""
+		markerWidth := 0
+		if p.oneShot {
+			marker = "▶ "
+			markerWidth = 2
+		}
 		dot := ""
 		dotWidth := 0
 		if c := p.Color(); c != "" {
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("●") + " "
 			dotWidth = 2
 		}
+		name := sanitizeLogLine(p.Name)
 		contentWidth := max(1, m.leftWidth()-5)
-		nameWidth := max(1, contentWidth-len(status)-1-dotWidth)
+		nameWidth := max(1, contentWidth-len(status)-1-dotWidth-markerWidth)
 		name = truncate(name, nameWidth)
-		line := dot + name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
+		line := marker + dot + name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
 		if i == m.selected {
 			line = selectedProcessStyle.Render(line)
 		}
@@ -878,6 +1155,15 @@ func (m *model) processList() string {
 		}
 	}
 	return b.String()
+}
+
+// oneShotStatusLabel maps a stopped one-shot to "idle" so a finished run does
+// not read like a crashed service; everything else keeps its status string.
+func oneShotStatusLabel(p *Process, status ProcessStatus) string {
+	if p.oneShot && status == StatusStopped {
+		return "idle"
+	}
+	return string(status)
 }
 
 func (m *model) logView() string {
@@ -1086,20 +1372,23 @@ func (m *model) applyPendingOrder() {
 	if names == nil {
 		return
 	}
-	byName := make(map[string]*Process, len(m.processes))
-	for _, p := range m.processes {
+	// Only the process prefix is reorderable; one-shot tasks stay pinned
+	// after it. names must be a permutation of the process names.
+	byName := make(map[string]*Process, m.numProcesses)
+	for _, p := range m.processes[:m.numProcesses] {
 		byName[p.Name] = p
 	}
-	reordered := make([]*Process, 0, len(m.processes))
+	reordered := make([]*Process, 0, m.numProcesses)
 	for _, name := range names {
 		if p := byName[name]; p != nil {
 			reordered = append(reordered, p)
 			delete(byName, name)
 		}
 	}
-	if len(reordered) != len(m.processes) {
+	if len(reordered) != m.numProcesses {
 		return
 	}
+	reordered = append(reordered, m.processes[m.numProcesses:]...)
 	selectedName := ""
 	if p := m.current(); p != nil {
 		selectedName = p.Name
@@ -1120,7 +1409,11 @@ func (m *model) applyPendingOrder() {
 func (m *model) moveSelectedCmd(delta int) tea.Cmd {
 	i := m.selected
 	j := i + delta
-	if i < 0 || i >= len(m.processes) || j < 0 || j >= len(m.processes) {
+	// One-shot tasks are pinned; reorder only within the process prefix.
+	if i < 0 || i >= m.numProcesses || j < 0 || j >= m.numProcesses {
+		if i >= m.numProcesses {
+			m.statusText = "Tasks can't be reordered"
+		}
 		return nil
 	}
 	reordered := make([]*Process, len(m.processes))
@@ -1130,9 +1423,9 @@ func (m *model) moveSelectedCmd(delta int) tea.Cmd {
 	m.processes = reordered
 	m.procsMu.Unlock()
 	m.selected = j
-	names := make([]string, len(reordered))
-	for k, p := range reordered {
-		names[k] = p.Name
+	names := make([]string, m.numProcesses)
+	for k := 0; k < m.numProcesses; k++ {
+		names[k] = reordered[k].Name
 	}
 	path := m.configPath
 	return func() tea.Msg {
@@ -1144,6 +1437,16 @@ func (m *model) moveSelectedCmd(delta int) tea.Cmd {
 // selector offers as swatches. "" means no dot.
 var colorPresets = []string{"", "#38bdf8", "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899", "#ef4444", "#f97316", "#f59e0b", "#84cc16", "#22c55e", "#14b8a6"}
 
+// nextPresetColor returns the palette entry after the given color, wrapping.
+func nextPresetColor(current string) string {
+	for i, c := range colorPresets {
+		if c == current {
+			return colorPresets[(i+1)%len(colorPresets)]
+		}
+	}
+	return colorPresets[1]
+}
+
 // cycleColorCmd moves the selected process to the next preset color and
 // persists it to the YAML config.
 func (m *model) cycleColorCmd() tea.Cmd {
@@ -1151,13 +1454,15 @@ func (m *model) cycleColorCmd() tea.Cmd {
 	if p == nil {
 		return nil
 	}
-	next := colorPresets[1]
-	for i, c := range colorPresets {
-		if c == p.Color() {
-			next = colorPresets[(i+1)%len(colorPresets)]
-			break
-		}
+	// Color persistence writes into the processes: mapping; a one-shot task
+	// lives under tasks:, so only cycle it in memory.
+	if p.oneShot {
+		next := nextPresetColor(p.Color())
+		p.SetColor(next)
+		m.statusText = "Color set (task color not saved)"
+		return nil
 	}
+	next := nextPresetColor(p.Color())
 	p.SetColor(next)
 	path := m.configPath
 	return func() tea.Msg {
@@ -1248,6 +1553,14 @@ func loadConfig(path string) (Config, error) {
 		if processCfg.Color != "" && !validColor(processCfg.Color) {
 			return Config{}, fmt.Errorf("process %q has invalid color %q; use hex (#0af, #00aaff) or a CSS color name", name, processCfg.Color)
 		}
+		for taskName, taskCmd := range processCfg.Tasks {
+			if strings.TrimSpace(taskName) == "" {
+				return Config{}, fmt.Errorf("process %q has a task with an empty name", name)
+			}
+			if strings.TrimSpace(taskCmd) == "" {
+				return Config{}, fmt.Errorf("process %q task %q has an empty command", name, taskName)
+			}
+		}
 		if processCfg.Cwd == "" {
 			processCfg.Cwd = "."
 		}
@@ -1265,12 +1578,48 @@ func loadConfig(path string) (Config, error) {
 		cfg.Processes[name] = processCfg
 	}
 
+	// Standalone one-shot tasks (root-level `tasks:`).
+	for name, taskCfg := range cfg.Tasks {
+		if strings.TrimSpace(name) == "" {
+			return Config{}, errors.New("task name cannot be empty")
+		}
+		if _, clash := cfg.Processes[name]; clash {
+			return Config{}, fmt.Errorf("task %q clashes with a process of the same name", name)
+		}
+		if strings.TrimSpace(taskCfg.Command) == "" {
+			return Config{}, fmt.Errorf("task %q command cannot be empty", name)
+		}
+		if taskCfg.Color != "" && !validColor(taskCfg.Color) {
+			return Config{}, fmt.Errorf("task %q has invalid color %q; use hex (#0af, #00aaff) or a CSS color name", name, taskCfg.Color)
+		}
+		if taskCfg.Cwd == "" {
+			taskCfg.Cwd = "."
+		}
+		if !filepath.IsAbs(taskCfg.Cwd) {
+			taskCfg.Cwd = filepath.Join(configDir, taskCfg.Cwd)
+		}
+		taskCfg.Cwd = filepath.Clean(taskCfg.Cwd)
+		info, err := os.Stat(taskCfg.Cwd)
+		if err != nil {
+			return Config{}, fmt.Errorf("task %q cwd: %w", name, err)
+		}
+		if !info.IsDir() {
+			return Config{}, fmt.Errorf("task %q cwd %q is not a directory", name, taskCfg.Cwd)
+		}
+		cfg.Tasks[name] = taskCfg
+	}
+
 	// Keep the YAML key order: it is the display order everywhere.
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err == nil && len(doc.Content) > 0 {
 		if processes := mappingValue(doc.Content[0], "processes"); processes != nil {
 			for i := 0; i+1 < len(processes.Content); i += 2 {
 				cfg.processOrder = append(cfg.processOrder, processes.Content[i].Value)
+			}
+		}
+		if tasks := mappingValue(doc.Content[0], "tasks"); tasks != nil {
+			for i := 0; i+1 < len(tasks.Content); i += 2 {
+				cfg.taskOrder = append(cfg.taskOrder, tasks.Content[i].Value)
 			}
 		}
 	}

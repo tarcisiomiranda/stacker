@@ -78,6 +78,71 @@ processes:
 	})
 }
 
+func TestControlPlaneRunTask(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, `
+version: 1
+processes:
+  demo:
+    command: "trap 'exit 0' TERM; while :; do sleep 1; done"
+    cwd: .
+    graceful_timeout: 2s
+    tasks:
+      hello: echo control-task-ok
+`)
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	m := newModel(cfg)
+	cs, err := startControlServer(m, cfgPath)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	defer cs.Close()
+
+	st, err := findRunningInstance(cfgPath)
+	if err != nil || st == nil {
+		t.Fatalf("findRunningInstance: st=%v err=%v", st, err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// tasks appear in the process listing
+	listResp, err := client.Get("http://" + st.Addr + "/v1/processes")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var list struct {
+		Processes []ProcessInfo `json:"processes"`
+	}
+	_ = json.NewDecoder(listResp.Body).Decode(&list)
+	listResp.Body.Close()
+	if len(list.Processes) != 1 || len(list.Processes[0].Tasks) != 1 || list.Processes[0].Tasks[0] != "hello" {
+		t.Fatalf("expected task listed, got %+v", list.Processes)
+	}
+
+	resp, err := client.Post("http://"+st.Addr+"/v1/tasks/demo/hello", "", nil)
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("run task status %d", resp.StatusCode)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(m.processes[0].Logs(), "\n"), "[task hello] control-task-ok")
+	})
+
+	bad, err := client.Post("http://"+st.Addr+"/v1/tasks/demo/nope", "", nil)
+	if err != nil {
+		t.Fatalf("run unknown task: %v", err)
+	}
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown task, got %d", bad.StatusCode)
+	}
+}
+
 func TestWebLogsEndpoints(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeConfig(t, dir, `

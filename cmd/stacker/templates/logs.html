@@ -28,6 +28,21 @@ pre { overflow: auto; }
               class="px-2 text-neutral-500 hover:text-white cursor-pointer">↻</button>
     </div>
     {{end}}
+    {{if .Standalone}}
+    <p id="task-head" class="px-4 pt-3 pb-1 text-xs uppercase tracking-wide text-neutral-500">Tasks · one-shot</p>
+    {{range .Standalone}}
+    <div data-trow="{{.Name}}"
+         class="flex items-stretch hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
+      <a href="/logs/{{.NameEscaped}}"
+         class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
+        <span class="truncate flex items-center gap-1.5"><span class="text-neutral-500 shrink-0">▶</span><span data-pcolor="{{.Name}}" class="inline-block size-2 rounded-full shrink-0{{if not .Color}} hidden{{end}}" style="background: {{.Color}}"></span>{{.Name}}</span>
+        <span data-pstatus="{{.Name}}" data-task="1" class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
+      </a>
+      <button data-act="start" data-name="{{.NameEscaped}}" title="run {{.Name}}"
+              class="px-2 text-neutral-500 hover:text-white cursor-pointer">▶</button>
+    </div>
+    {{end}}
+    {{end}}
   </nav>
 </aside>
 
@@ -35,14 +50,16 @@ pre { overflow: auto; }
   <header id="topbar" class="flex items-center gap-4 flex-wrap px-4 py-2 border-b border-neutral-800 bg-neutral-900">
     <h2 class="font-bold">
       {{.Name}}
-      <span data-pstatus-current="{{.Name}}" class="{{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}{{if and .Errors (ne .Status "failed")}} ⚠{{.Errors}}{{end}}]</span>
+      <span data-pstatus-current="{{.Name}}" {{if .IsTask}}data-task="1"{{end}} class="{{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">[{{.Status}}{{if and .Errors (ne .Status "failed")}} ⚠{{.Errors}}{{end}}]</span>
     </h2>
     <button data-act="start" data-name="{{.NameEscaped}}"
-            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Start</button>
+            class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">{{if .IsTask}}▶ Run{{else}}Start{{end}}</button>
     <button data-act="stop" data-name="{{.NameEscaped}}"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Stop</button>
+    {{if not .IsTask}}
     <button data-act="restart" data-name="{{.NameEscaped}}"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Restart</button>
+    {{end}}
     {{if .Port}}
     <button data-act="free-port" data-name="{{.NameEscaped}}" title="kill whatever is listening on port {{.Port}}"
             class="px-3 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">Free port {{.Port}}</button>
@@ -75,6 +92,7 @@ pre { overflow: auto; }
             error badge
           </label>
         </div>
+        {{if not .IsTask}}
         <div class="border-t border-neutral-800 pt-2">
           <p class="text-xs text-neutral-400 mb-2 flex items-center gap-1.5">
             <span id="color-dot" class="inline-block size-3 rounded-full border border-neutral-500" style="background: {{.Color}}"></span>
@@ -90,6 +108,18 @@ pre { overflow: auto; }
             <button id="color-none" class="text-xs text-neutral-400 hover:text-white cursor-pointer">remove</button>
           </div>
         </div>
+        {{end}}
+        {{if .ProcTasks}}
+        <div class="border-t border-neutral-800 pt-2">
+          <p class="text-xs text-neutral-400 mb-2">Tasks — run once</p>
+          <div class="flex flex-wrap gap-2">
+            {{range .ProcTasks}}
+            <button data-task="{{.Name}}" title="{{.Command}}"
+                    class="px-2.5 py-1 border border-neutral-600 bg-neutral-800 hover:bg-neutral-700 cursor-pointer">▶ {{.Name}}</button>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
       </div>
     </div>
     <span id="frozen" class="hidden text-amber-400">⏸ frozen</span>
@@ -167,7 +197,9 @@ plist.addEventListener("dragover", (e) => {
     const box = r.getBoundingClientRect();
     return e.clientY < box.top + box.height / 2;
   });
+  const head = document.getElementById("task-head");
   if (after) plist.insertBefore(dragRow, after);
+  else if (head) plist.insertBefore(dragRow, head);
   else plist.appendChild(dragRow);
 });
 
@@ -195,11 +227,16 @@ plist.addEventListener("dragend", async () => {
 // Keep the sidebar in the server's order (other tabs, TUI restarts).
 function applyOrder(processes) {
   if (dragRow) return;
-  const names = (processes || []).map((p) => p.name);
+  // Only service rows are reorderable; one-shot task rows are pinned.
+  const names = (processes || []).map((p) => p.name)
+    .filter((n) => plist.querySelector(`[data-prow="${CSS.escape(n)}"]`));
   if (JSON.stringify(names) === JSON.stringify(sidebarOrder())) return;
+  const head = document.getElementById("task-head");
   for (const name of names) {
     const row = plist.querySelector(`[data-prow="${CSS.escape(name)}"]`);
-    if (row) plist.appendChild(row);
+    if (!row) continue;
+    if (head) plist.insertBefore(row, head);
+    else plist.appendChild(row);
   }
 }
 
@@ -212,14 +249,19 @@ const morePop = document.getElementById("more-pop");
 const colorDot = document.getElementById("color-dot");
 const swatches = document.getElementById("color-swatches");
 
-for (const c of PALETTE) {
-  const b = document.createElement("button");
-  b.className = "size-6 rounded-full cursor-pointer border border-neutral-700 " +
-                "hover:scale-110 hover:border-white transition-transform";
-  b.style.background = c;
-  b.title = c;
-  b.addEventListener("click", () => setColor(c));
-  swatches.appendChild(b);
+// The color selector is absent on standalone-task pages; wire it only when present.
+if (swatches) {
+  for (const c of PALETTE) {
+    const b = document.createElement("button");
+    b.className = "size-6 rounded-full cursor-pointer border border-neutral-700 " +
+                  "hover:scale-110 hover:border-white transition-transform";
+    b.style.background = c;
+    b.title = c;
+    b.addEventListener("click", () => setColor(c));
+    swatches.appendChild(b);
+  }
+  document.getElementById("color-custom").addEventListener("change", (e) => setColor(e.target.value));
+  document.getElementById("color-none").addEventListener("click", () => setColor(""));
 }
 
 function applyColor(name, color) {
@@ -227,7 +269,7 @@ function applyColor(name, color) {
     dot.style.background = color || "";
     dot.classList.toggle("hidden", !color);
   }
-  if (name === currentName) colorDot.style.background = color || "";
+  if (colorDot && name === currentName) colorDot.style.background = color || "";
 }
 
 async function setColor(color) {
@@ -252,8 +294,27 @@ moreBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   morePop.classList.toggle("hidden");
 });
-document.getElementById("color-custom").addEventListener("change", (e) => setColor(e.target.value));
-document.getElementById("color-none").addEventListener("click", () => setColor(""));
+
+// One-shot task buttons: fire and forget; output streams into the log below.
+document.querySelectorAll("[data-task]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    morePop.classList.add("hidden");
+    try {
+      const resp = await fetch("/api/{{.NameEscaped}}/task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: btn.dataset.task }),
+      });
+      const d = await resp.json();
+      if (!d.ok) throw new Error(d.error || "failed");
+      msg.textContent = "task " + btn.dataset.task + " started";
+      poll(true);
+    } catch (e) {
+      msg.textContent = "task failed: " + e.message;
+    }
+    setTimeout(() => { msg.textContent = ""; }, 2000);
+  });
+});
 addEventListener("click", (e) => {
   if (!morePop.classList.contains("hidden") && !morePop.contains(e.target) && e.target !== moreBtn) {
     morePop.classList.add("hidden");
@@ -355,13 +416,16 @@ function updateStatuses(processes) {
     const badge = errs > 0 && p.status !== "failed";
     const el = document.querySelector(`[data-pstatus="${CSS.escape(p.name)}"]`);
     if (el) {
-      el.textContent = p.status + (badge ? "!" : "");
+      // A standalone task shows "idle" instead of "stopped" (row marks itself).
+      const label = (el.dataset.task && p.status === "stopped") ? "idle" : p.status;
+      el.textContent = label + (badge ? "!" : "");
       el.classList.remove(...STATUS_CLASSES);
       el.classList.add(statusClass(p.status, errs));
     }
     const cur = document.querySelector(`[data-pstatus-current="${CSS.escape(p.name)}"]`);
     if (cur) {
-      cur.textContent = "[" + p.status + (badge ? ` ⚠${errs}` : "") + "]";
+      const label = (cur.dataset.task && p.status === "stopped") ? "idle" : p.status;
+      cur.textContent = "[" + label + (badge ? ` ⚠${errs}` : "") + "]";
       cur.classList.remove(...STATUS_CLASSES);
       cur.classList.add(statusClass(p.status, errs));
     }

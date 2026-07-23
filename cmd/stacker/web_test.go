@@ -222,9 +222,45 @@ func TestWebFreePortEndpoint(t *testing.T) {
 	}
 }
 
+func TestWebTaskEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	m := newModel(Config{Processes: map[string]ProcessConfig{
+		"api": {Command: "sleep 60", Cwd: dir, Tasks: map[string]string{"hello": "echo done-web"}},
+	}})
+	ws, err := startWebServer(m, "stacker.yml")
+	if err != nil {
+		t.Fatalf("start web server: %v", err)
+	}
+	defer ws.Close()
+
+	resp, err := http.Post("http://"+ws.Addr()+"/api/api/task", "application/json",
+		strings.NewReader(`{"name": "hello"}`))
+	if err != nil {
+		t.Fatalf("post task: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	p := m.processByName("api")
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(p.Logs(), "\n"), "[task hello] done-web")
+	})
+
+	bad, err := http.Post("http://"+ws.Addr()+"/api/api/task", "application/json",
+		strings.NewReader(`{"name": "missing"}`))
+	if err != nil {
+		t.Fatalf("post bad task: %v", err)
+	}
+	defer bad.Body.Close()
+	if bad.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown task, got %d", bad.StatusCode)
+	}
+}
+
 func TestWebLogsPageRendersColorPickerAndWrapToggle(t *testing.T) {
 	m := newModel(Config{UI: UIConfig{WordWrap: true}, Processes: map[string]ProcessConfig{
-		"api": {Command: "echo ok", Color: "#38bdf8", Port: 8123},
+		"api": {Command: "echo ok", Color: "#38bdf8", Port: 8123, Tasks: map[string]string{"migrate": "mise run migrate"}},
 	}})
 	ws, err := startWebServer(m, "stacker.yml")
 	if err != nil {
@@ -246,9 +282,61 @@ func TestWebLogsPageRendersColorPickerAndWrapToggle(t *testing.T) {
 	}
 	page := string(body)
 	// The template must fully execute: the script block is at the end.
-	for _, want := range []string{`id="more-pop"`, `id="wrap" checked`, `id="herr"`, `id="plist"`, `draggable="true"`, `data-act="free-port"`, "Free port 8123", "whitespace-pre-wrap", "</html>"} {
+	for _, want := range []string{`id="more-pop"`, `id="wrap" checked`, `id="herr"`, `id="plist"`, `draggable="true"`, `data-act="free-port"`, "Free port 8123", `data-task="migrate"`, "whitespace-pre-wrap", "</html>"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("logs page missing %q:\n%s", want, page)
 		}
 	}
+}
+
+func TestWebStandaloneTaskSidebarAndPage(t *testing.T) {
+	m := newModel(Config{
+		Processes: map[string]ProcessConfig{"api": {Command: "echo ok"}},
+		Tasks:     map[string]TaskConfig{"deploy": {Command: "echo deploy"}},
+		taskOrder: []string{"deploy"},
+	})
+	ws, err := startWebServer(m, "stacker.yml")
+	if err != nil {
+		t.Fatalf("start web server: %v", err)
+	}
+	defer ws.Close()
+
+	// A one-shot's own log page marks it as a task (▶ Run, no color section).
+	resp, err := http.Get("http://" + ws.Addr() + "/logs/deploy")
+	if err != nil {
+		t.Fatalf("get task page: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	page := string(body)
+	for _, want := range []string{`data-trow="deploy"`, "▶ Run", "Tasks · one-shot"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("task page missing %q:\n%s", want, page)
+		}
+	}
+	if strings.Contains(page, `id="color-swatches"`) {
+		t.Fatal("standalone task page must not offer the color selector")
+	}
+
+	// The color endpoint is refused for a one-shot.
+	c, err := http.Post("http://"+ws.Addr()+"/api/deploy/color", "application/json",
+		strings.NewReader(`{"color": "#38bdf8"}`))
+	if err != nil {
+		t.Fatalf("post color: %v", err)
+	}
+	defer c.Body.Close()
+	if c.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for task color, got %d", c.StatusCode)
+	}
+
+	// Running the one-shot via its start action executes the command.
+	run, err := http.Post("http://"+ws.Addr()+"/api/deploy/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post start: %v", err)
+	}
+	run.Body.Close()
+	p := m.processByName("deploy")
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(p.Logs(), "\n"), "deploy") && p.Status() == StatusStopped
+	})
 }

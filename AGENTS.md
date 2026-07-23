@@ -24,6 +24,9 @@ processes:
     graceful_timeout: 8s
     port: 8000
     color: "#0af"
+    tasks:
+      migrate: mise run migrate
+      seed: python manage.py seed
 ```
 
 ### Root fields
@@ -52,7 +55,25 @@ Each key below `processes` is the process name displayed in the TUI. Names must 
 - `graceful_timeout`: optional positive Go duration such as `500ms`, `8s`, `2m`, or `1m30s`. Omission means `8s`.
 - `port`: optional TCP port (`1`–`65535`). When set, Stacker frees that port (terminates listeners) before every start/restart so a stray process left by an IDE/AI agent does not block the bind. Omission means no automatic free-port.
 - `color`: optional visual group marker rendered as a colored dot next to the process name in the TUI list and the web sidebar. Hex (`"#0af"`, `"#00aaff"`, quoted — `#` starts a YAML comment) or a CSS color name (`red`). Purely cosmetic; omission renders no dot. The running app can rewrite this field (TUI key `c` cycles a preset palette; the web viewer has a color selector); both persist the change to this YAML file preserving comments, so do not assume the file is static while Stacker runs.
+- `tasks`: optional map of `name: command` one-shot commands (migrations, seeds, cache clears) **scoped to this process** — run on demand in the process's `cwd` with its inherited environment. Output streams into the process's log prefixed `[task <name>]`; the run does **not** change the process status, so a long-running `--reload` server keeps serving. Names and commands must be non-empty. Trigger a task from the TUI (`t` opens a picker), the web viewer (More ▾ → Tasks), or the CLI (`stacker run <process> <task>`). Use these for "run once, process, exit" commands tied to one service, instead of adding a second always-on process.
 - Do not add any other process fields.
+
+### Standalone tasks (root `tasks:`)
+
+Root-level `tasks:` are one-shot commands **not tied to any process** — for commands that belong to no single service or span several (deploys, backups, ad-hoc scripts). Each becomes its own entry in the TUI list and web sidebar (marked `▶`), with its own log. Running one (TUI `enter`, web `▶ Run`, or `stacker start <task>`) executes the command once; a clean exit shows `idle`, not a crashed service. This is distinct from per-process `tasks:` (nested under a process, which stream into that process's log).
+
+```yaml
+tasks:
+  deploy:
+    command: ./deploy.sh
+    cwd: ./infra
+  backup-db:
+    command: pg_dump app > backup.sql
+```
+
+- Each standalone task has `command` (required, non-empty), optional `cwd` (resolved from the config dir, must exist), and optional `color`.
+- A standalone task name must not clash with a process name.
+- Standalone tasks are pinned after the processes in the list; they are excluded from reorder (TUI `shift+↑/↓`, web drag) and their color is not runtime-editable.
 
 ### Command formatting
 
@@ -93,12 +114,14 @@ stacker start backend
 stacker stop backend
 stacker restart backend
 stacker free-port 8000                   # works even without the TUI
+stacker tasks                            # list one-shot tasks per process
+stacker run backend migrate              # run a one-shot task
 stacker version                          # print binary version (-v, --version)
 ```
 
 Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
 
-Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed). The log page header shows only the main actions (Start, Stop, Restart, and Free port when the process has `port:` set); everything else (copy, marks, auto-refresh, wrap, error badge, color selector, raw link) lives in the `More ▾` menu. Routes: `GET /` (process index), `GET /logs/{name}` (HTML page), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses, colors, and error counts; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/free-port` (kill listeners on the configured port; 400 when the process has no `port:`), `POST /api/{name}/mark` (append a timestamped separator to the logs), `POST /api/{name}/color` with body `{"color": "#38bdf8"}` (set the process dot color and rewrite it in `stacker.yml`; empty string removes it), `POST /api/order` with body `{"names": [...]}` (reorder the process list — must be a permutation of all names; rewrites the mapping order in `stacker.yml` and the TUI follows), `POST /api/highlight-errors` with body `{"enabled": true}` (toggle error detection and persist `ui.highlight_errors`), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs, `m` marks every running process, `W` toggles word wrap, `c` cycles the selected process's color, `shift+↑/↓` moves the selected process in the list (saved to the YAML), and `?` opens the key help overlay.
+Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed). The log page header shows only the main actions (Start, Stop, Restart, and Free port when the process has `port:` set); everything else (copy, marks, auto-refresh, wrap, error badge, color selector, raw link) lives in the `More ▾` menu. Routes: `GET /` (process index), `GET /logs/{name}` (HTML page), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses, colors, and error counts; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/free-port` (kill listeners on the configured port; 400 when the process has no `port:`), `POST /api/{name}/task` with body `{"name": "migrate"}` (run a one-shot task; output streams into the log; 404 for an unknown task), `POST /api/{name}/mark` (append a timestamped separator to the logs), `POST /api/{name}/color` with body `{"color": "#38bdf8"}` (set the process dot color and rewrite it in `stacker.yml`; empty string removes it), `POST /api/order` with body `{"names": [...]}` (reorder the process list — must be a permutation of all names; rewrites the mapping order in `stacker.yml` and the TUI follows), `POST /api/highlight-errors` with body `{"enabled": true}` (toggle error detection and persist `ui.highlight_errors`), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs, `m` marks every running process, `t` opens the one-shot task picker, `W` toggles word wrap, `c` cycles the selected process's color, `shift+↑/↓` moves the selected process in the list (saved to the YAML), and `?` opens the key help overlay.
 
 ### Agent skills (multi-tool)
 

@@ -383,6 +383,286 @@ processes:
 	})
 }
 
+func TestRunTaskStreamsOutputWithoutTouchingStatus(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("api", ProcessConfig{
+		Command: "sleep 60",
+		Cwd:     dir,
+		Tasks:   map[string]string{"hello": "echo migrate-ok"},
+	}, 100)
+	p.status = StatusRunning // pretend the service is up
+
+	if err := p.RunTask("hello", func() {}); err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(p.Logs(), "\n"), "[task hello] done")
+	})
+	logs := strings.Join(p.Logs(), "\n")
+	if !strings.Contains(logs, "[task hello] $ echo migrate-ok") {
+		t.Fatalf("expected task command echoed, got %q", logs)
+	}
+	if !strings.Contains(logs, "[task hello] migrate-ok") {
+		t.Fatalf("expected task output captured, got %q", logs)
+	}
+	if p.Status() != StatusRunning {
+		t.Fatalf("task must not change status, got %q", p.Status())
+	}
+}
+
+func TestRunTaskRunsInProcessCwd(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("api", ProcessConfig{
+		Cwd:   dir,
+		Tasks: map[string]string{"pwd": "pwd"},
+	}, 100)
+	if err := p.RunTask("pwd", func() {}); err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(p.Logs(), "\n"), "[task pwd] done")
+	})
+	if !strings.Contains(strings.Join(p.Logs(), "\n"), dir) {
+		t.Fatalf("expected task to run in %q; logs: %q", dir, p.Logs())
+	}
+}
+
+func TestRunTaskUnknown(t *testing.T) {
+	p := NewProcess("api", ProcessConfig{Tasks: map[string]string{"a": "true"}}, 10)
+	if err := p.RunTask("missing", func() {}); err == nil {
+		t.Fatal("expected error for unknown task")
+	}
+}
+
+func TestRunTaskFailureBumpsBadgeWhenDetecting(t *testing.T) {
+	dir := t.TempDir()
+	p := NewProcess("api", ProcessConfig{
+		Cwd:   dir,
+		Tasks: map[string]string{"boom": "exit 3"},
+	}, 100)
+	p.detectErrors = true
+	if err := p.RunTask("boom", func() {}); err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return strings.Contains(strings.Join(p.Logs(), "\n"), "[task boom] exited")
+	})
+	if p.Errors() == 0 {
+		t.Fatal("expected failed task to bump the error badge")
+	}
+}
+
+func TestLoadConfigAcceptsTasks(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    tasks:
+      migrate: mise run migrate
+      seed: python manage.py seed
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	tasks := cfg.Processes["api"].Tasks
+	if tasks["migrate"] != "mise run migrate" || tasks["seed"] != "python manage.py seed" {
+		t.Fatalf("unexpected tasks: %#v", tasks)
+	}
+}
+
+func TestLoadConfigRejectsEmptyTaskCommand(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    tasks:
+      migrate: ""
+`)
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected empty task command to be rejected")
+	}
+}
+
+func TestStandaloneTasksLoadAndAppendAfterProcesses(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, `
+version: 1
+processes:
+  backend:
+    command: echo ok
+tasks:
+  deploy:
+    command: echo deploy
+    color: "#f97316"
+  clear-cache:
+    command: echo clear
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Tasks) != 2 || cfg.Tasks["deploy"].Command != "echo deploy" {
+		t.Fatalf("unexpected tasks: %#v", cfg.Tasks)
+	}
+	// cwd resolves relative to the config dir.
+	if cfg.Tasks["deploy"].Cwd != dir {
+		t.Fatalf("expected task cwd %q, got %q", dir, cfg.Tasks["deploy"].Cwd)
+	}
+
+	m := newModel(cfg)
+	if m.numProcesses != 1 {
+		t.Fatalf("expected 1 process, got numProcesses=%d", m.numProcesses)
+	}
+	if len(m.processes) != 3 {
+		t.Fatalf("expected 3 entries (1 process + 2 tasks), got %d", len(m.processes))
+	}
+	if m.processes[0].Name != "backend" || m.processes[0].oneShot {
+		t.Fatalf("expected backend first as a service, got %+v", m.processes[0])
+	}
+	// Tasks follow in YAML order.
+	if m.processes[1].Name != "deploy" || !m.processes[1].oneShot {
+		t.Fatalf("expected deploy one-shot second, got %+v", m.processes[1])
+	}
+	if m.processes[2].Name != "clear-cache" || !m.processes[2].oneShot {
+		t.Fatalf("expected clear-cache one-shot third, got %+v", m.processes[2])
+	}
+}
+
+func TestStandaloneTaskRunsAndReturnsIdle(t *testing.T) {
+	dir := t.TempDir()
+	m := newModel(Config{
+		Tasks:     map[string]TaskConfig{"deploy": {Command: "echo deployed", Cwd: dir}},
+		taskOrder: []string{"deploy"},
+	})
+	p := m.processByName("deploy")
+	if p == nil || !p.oneShot {
+		t.Fatal("expected a one-shot process named deploy")
+	}
+	if err := p.Start(func() {}); err != nil {
+		t.Fatalf("start one-shot: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool { return p.Status() == StatusStopped })
+	if !strings.Contains(strings.Join(p.Logs(), "\n"), "deployed") {
+		t.Fatalf("expected task output, got %q", p.Logs())
+	}
+	// A stopped one-shot displays as "idle".
+	if got := oneShotStatusLabel(p, p.Status()); got != "idle" {
+		t.Fatalf("expected idle label, got %q", got)
+	}
+}
+
+func TestLoadConfigRejectsTaskProcessNameClash(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  worker:
+    command: echo ok
+tasks:
+  worker:
+    command: echo clash
+`)
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected clash between task and process name to be rejected")
+	}
+}
+
+func TestLoadConfigRejectsEmptyStandaloneTask(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+tasks:
+  deploy:
+    command: ""
+`)
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected empty standalone task command to be rejected")
+	}
+}
+
+func TestReorderPinsOneShots(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, `
+version: 1
+processes:
+  api:
+    command: echo ok
+  web:
+    command: echo ok
+tasks:
+  deploy:
+    command: echo deploy
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	m := newModel(cfg)
+	m.configPath = path
+
+	// Selecting the one-shot and moving it is refused.
+	m.selected = 2
+	if cmd := m.moveSelectedCmd(-1); cmd != nil {
+		t.Fatal("expected moving a one-shot to be refused")
+	}
+	if m.processes[2].Name != "deploy" {
+		t.Fatalf("one-shot must stay pinned, got %q", m.processes[2].Name)
+	}
+
+	// Moving a real process persists only the process order (no task name).
+	m.selected = 0
+	cmd := m.moveSelectedCmd(1)
+	if cmd == nil {
+		t.Fatal("expected a save command")
+	}
+	if msg, ok := cmd().(orderSavedMsg); !ok || msg.err != nil {
+		t.Fatalf("order save failed: %#v", msg)
+	}
+	cfg2, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("reordered config must load: %v", err)
+	}
+	if len(cfg2.processOrder) != 2 || cfg2.processOrder[0] != "web" || cfg2.processOrder[1] != "api" {
+		t.Fatalf("expected processes reordered to [web api], got %v", cfg2.processOrder)
+	}
+	if len(cfg2.Tasks) != 1 || cfg2.Tasks["deploy"].Command == "" {
+		t.Fatalf("standalone task must survive process reorder, got %#v", cfg2.Tasks)
+	}
+	if m.processes[len(m.processes)-1].Name != "deploy" {
+		t.Fatal("one-shot must remain last after reorder")
+	}
+}
+
+func TestWebPendingOrderKeepsTasksPinned(t *testing.T) {
+	m := newModel(Config{
+		Processes: map[string]ProcessConfig{
+			"api": {Command: "echo ok"},
+			"web": {Command: "echo ok"},
+		},
+		processOrder: []string{"api", "web"},
+		Tasks:        map[string]TaskConfig{"deploy": {Command: "echo ok"}},
+		taskOrder:    []string{"deploy"},
+	})
+	// Web sends only the service names.
+	m.requestOrder([]string{"web", "api"})
+	m.applyPendingOrder()
+
+	got := make([]string, len(m.processes))
+	for i, p := range m.processes {
+		got[i] = p.Name
+	}
+	want := []string{"web", "api", "deploy"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected order %v, got %v", want, got)
+		}
+	}
+}
+
 func TestErrorDetectionCountsAndMarkClears(t *testing.T) {
 	p := NewProcess("test", ProcessConfig{}, 100)
 	p.detectErrors = true

@@ -27,3 +27,15 @@ processes:
     cwd: .
     autostart: true
     graceful_timeout: 3s
+    tasks:  # per-process one-shot: TUI `t`, web More ▾ → Tasks, or `stacker run demo <task>`
+      date: date
+      list-files: ls -la
+
+# Standalone one-shot tasks: own entry (▶) in the list; run with Enter / web ▶ Run
+# / `stacker start <name>`. For commands not tied to a single process.
+tasks:
+  disk-usage:
+    command: df -h
+  list-here:
+    command: ls -la
+    cwd: .
