@@ -14,7 +14,9 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **Automatic port freeing** — an optional `port:` is cleared before every start/restart, killing the whole supervisor tree (`npm → node`, `mise → uvicorn`) so restarts don't fail with "address already in use". Works on Linux, macOS, and Windows.
 - **Split log capture** — separate stdout/stderr, scrollable, with a configurable per-process memory cap.
 - **CLI control plane** — `list`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
-- **On-demand web viewer** — press `w` for a browser UI on `127.0.0.1` (random high port): live logs, start/stop/restart, drag-to-reorder, and more.
+- **Serve + attach** — `stacker serve -d` runs headless in the background; `stacker attach` (or plain `stacker`) opens the TUI; `q` detaches without killing services; `stacker down` shuts everything down.
+- **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
+- **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`). On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
 - **One-shot tasks** — named commands (migrations, seeds, deploys) that run once and exit, either scoped to a process or standalone.
 - **Error highlighting** — opt-in orange badge when output looks like a traceback/panic/error, even while the service keeps running.
 - **Word wrap, per-process color dots, log marks, and a help overlay** — all toggleable at runtime; color and order changes are written back to the YAML.
@@ -181,7 +183,7 @@ Stacker prefers the native clipboard (`pbcopy` on macOS), falling back to OSC 52
 
 ## Web log viewer
 
-Press `w` in the TUI to toggle a browser UI on `127.0.0.1` with a random high port (off by default, no restart needed). Turning it on copies the URL and opens your default browser; press `w` again to shut it down.
+Press `w` in the TUI to toggle a browser UI on `0.0.0.0:52911` by default (off by default, no restart needed; override with `ui.web_host` / `ui.web_port`). Turning it on copies the URL; on a desktop it also opens your browser, while on SSH/headless hosts it only shows/copies the URL. Press `w` again to shut it down.
 
 The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶`), and per-process:
 
@@ -197,20 +199,30 @@ It's read-and-control only over loopback — no auth, meant for local dev.
 Start the TUI once per project config. While it runs, drive it through the CLI instead of launching services yourself:
 
 ```bash
-stacker -config stacker.yml     # start the TUI + local control plane
+stacker -config stacker.yml     # session mode: TUI + control plane
+stacker serve                   # headless supervisor (Ctrl+C / stacker down to stop)
+stacker serve -d                # same, daemonized in the background
+stacker attach                  # TUI against a running serve instance (q detaches)
+stacker down                    # stop all processes and shut down the supervisor
 stacker ping                    # exit 0 if an instance runs for this config
 stacker list --json             # process names, status, ports
 stacker status backend --json   # one process
 stacker start backend
 stacker stop backend
 stacker restart backend
-stacker free-port 8000          # works even without a running TUI
+stacker free-port 8000          # works even without a running instance
 stacker tasks                   # list one-shot tasks per process
 stacker run backend migrate     # run a task; output goes to the process log
 stacker version                 # -v / --version also work
 ```
 
-Only one Stacker TUI is allowed per absolute config path; the control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir). Agents should:
+Only one Stacker instance is allowed per absolute config path; the control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
+
+**Session vs serve:** `stacker` (no subcommand) is session mode — the TUI owns the process; `q` stops everything. `stacker serve` is headless; processes keep running until `stacker down` or SIGTERM. `stacker attach` (or plain `stacker` while serve is up) opens a TUI that **detaches** on `q` without killing services.
+
+**Live config reload:** while any instance runs, edits to `stacker.yml` (add/remove/reorder processes, field changes) are picked up within ~500ms. New processes with `autostart: true` start automatically. Removing a **running** process keeps it listed (⚠) until you stop it, then it disappears. Invalid YAML is rejected and the previous config stays active.
+
+Agents should:
 
 1. `stacker ping` (or `list`) for the project `stacker.yml`;
 2. if running, `restart` / `start` / `stop` / `run` via the CLI;

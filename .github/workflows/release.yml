@@ -112,8 +112,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Full history + tags so release.py can build the changelog from
-          # commit messages since the previous tag.
+          # Full history + tags: release.py prefers releases/<tag>.yaml notes,
+          # and falls back to commit subjects since the previous SemVer tag.
           fetch-depth: 0
 
       - name: Install Python

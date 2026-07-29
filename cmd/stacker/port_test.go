@@ -97,6 +97,23 @@ func TestFreePortNothingListening(t *testing.T) {
 	}
 }
 
+func TestListenersOnPortDoesNotTrustEmptyLsof(t *testing.T) {
+	// Regression: empty/failed lsof must not hide a live listener.
+	port, stop := startPortHolder(t)
+	defer stop()
+
+	pids, err := listenersOnPort(port)
+	if err != nil {
+		t.Fatalf("listenersOnPort: %v", err)
+	}
+	if len(pids) == 0 {
+		t.Fatal("expected at least one listener pid")
+	}
+	if !portInUseProbe(port) {
+		t.Fatal("probe should report port in use")
+	}
+}
+
 func TestParsePIDs(t *testing.T) {
 	pids := parsePIDs("123\n456 123\n")
 	if len(pids) != 2 || pids[0] != 123 || pids[1] != 456 {
@@ -124,6 +141,22 @@ func TestParseArgs(t *testing.T) {
 	}
 	if len(rest) != 3 || rest[0] != "restart" || rest[1] != "backend" || rest[2] != "--json" {
 		t.Fatalf("rest: %#v", rest)
+	}
+
+	cfg2, rest2 := parseArgs([]string{"--config", "./stacker.yml", "a"})
+	if cfg2 != "./stacker.yml" {
+		t.Fatalf("--config path: %q", cfg2)
+	}
+	if len(rest2) != 1 || rest2[0] != "a" {
+		t.Fatalf("rest for attach alias: %#v", rest2)
+	}
+
+	cfg3, rest3 := parseArgs([]string{"--config=proj.yml", "attach"})
+	if cfg3 != "proj.yml" {
+		t.Fatalf("--config= path: %q", cfg3)
+	}
+	if len(rest3) != 1 || rest3[0] != "attach" {
+		t.Fatalf("rest for attach: %#v", rest3)
 	}
 }
 

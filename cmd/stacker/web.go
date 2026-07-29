@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -16,8 +17,11 @@ import (
 	"time"
 )
 
-// Web log viewer: an on-demand HTTP server on 127.0.0.1 with a random high
-// port. Off by default; the TUI toggles it with the `w` key, no restart needed.
+// Web log viewer: an on-demand HTTP server. Default bind is 0.0.0.0:52911 so a
+// Stacker on a remote machine is reachable from other hosts. Off by default;
+// the TUI toggles it with the `w` key (no restart needed). Override with
+// ui.web_host / ui.web_port in stacker.yml.
+//
 // Routes:
 //
 //	GET /                  index with one link per process
@@ -26,6 +30,11 @@ import (
 
 //go:embed templates/*.html
 var templateFS embed.FS
+
+const (
+	defaultWebHost = "0.0.0.0"
+	defaultWebPort = 52911
+)
 
 var (
 	indexTemplate = template.Must(template.ParseFS(templateFS, "templates/index.html"))
@@ -40,7 +49,7 @@ type webServer struct {
 }
 
 func startWebServer(m *model, config string) (*webServer, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := listenWeb(m.cfg.UI)
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +63,51 @@ func startWebServer(m *model, config string) (*webServer, error) {
 	return ws, nil
 }
 
+// listenWeb binds the preferred host:port, falling back to an ephemeral port
+// on the same host when the preferred port is already taken.
+func listenWeb(ui UIConfig) (net.Listener, error) {
+	host := strings.TrimSpace(ui.WebHost)
+	if host == "" {
+		host = defaultWebHost
+	}
+	port := ui.WebPort
+	if port == 0 {
+		port = defaultWebPort
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		return ln, nil
+	}
+	// Preferred port busy: keep the host, pick any free port.
+	fallback := net.JoinHostPort(host, "0")
+	ln, err2 := net.Listen("tcp", fallback)
+	if err2 != nil {
+		return nil, fmt.Errorf("web listen %s: %w (fallback %s: %v)", addr, err, fallback, err2)
+	}
+	return ln, nil
+}
+
 func (ws *webServer) Addr() string { return ws.listener.Addr().String() }
+
+// webPublicBaseURL returns an http://host:port suitable for pasting into a
+// browser. When listening on 0.0.0.0 / ::, prefer the machine hostname so a
+// remote client has a usable address instead of 0.0.0.0.
+func webPublicBaseURL(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "http://" + listenAddr
+	}
+	switch host {
+	case "0.0.0.0", "::", "[::]", "":
+		if h, herr := os.Hostname(); herr == nil && h != "" {
+			host = h
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
 
 func (ws *webServer) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -369,8 +422,23 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // webLogsURL builds the browser URL for a process's log page.
-func webLogsURL(addr, name string) string {
-	return "http://" + addr + "/logs/" + url.PathEscape(name)
+func webLogsURL(listenAddr, name string) string {
+	return webPublicBaseURL(listenAddr) + "/logs/" + url.PathEscape(name)
+}
+
+// canOpenBrowser reports whether a desktop browser launch is plausible.
+// Headless/SSH sessions (no DISPLAY / WAYLAND_DISPLAY on Linux) skip xdg-open
+// so the TUI status line is not polluted with a expected failure.
+func canOpenBrowser() bool {
+	switch runtime.GOOS {
+	case "linux":
+		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+			return false
+		}
+	case "darwin", "windows":
+		return true
+	}
+	return true
 }
 
 // openBrowser opens url with the platform's default browser.
@@ -382,7 +450,13 @@ func openBrowser(target string) error {
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
 	default:
+		if _, err := exec.LookPath("xdg-open"); err != nil {
+			return fmt.Errorf("xdg-open not found")
+		}
 		cmd = exec.Command("xdg-open", target)
 	}
+	// Discard browser helper output; failures still return via Start/Wait.
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	return cmd.Start()
 }

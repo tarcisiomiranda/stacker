@@ -1,0 +1,26 @@
+# Hand-written release notes for v0.10.0.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.10.0
+
+highlights: |
+  Run Stacker in the background, reattach the TUI later, hot-reload stacker.yml,
+  and use the web viewer comfortably on remote servers.
+
+features:
+  - "**Serve + attach** — `stacker serve` / `serve -d` runs a headless supervisor; `stacker a` (or `attach`) opens the TUI; `q` detaches without killing services; `stacker down` stops everything"
+  - "**Single-instance discovery** — when only one supervisor is running, `stacker a` / `list` / `down` find it even if you omit `--config`"
+  - "**Live YAML reload** — add, remove, or reorder processes (and tasks) in `stacker.yml` without restarting Stacker; `autostart: true` on new processes is honored; running processes removed from YAML stay listed until stopped"
+  - "**Web viewer for servers** — default bind `0.0.0.0:52911` (override with `ui.web_host` / `ui.web_port`); skips `xdg-open` on headless/SSH and shows a pasteable URL"
+  - "**CLI ergonomics** — `stacker a` alias for attach; `--config` / `-config` / `--config=path`; clearer help and error examples that always show the same config path"
+  - "**Help overlay + footer** — keycap-style shortcuts; fixed primary actions (stop / restart / free port / web) in the footer"
+
+fixes:
+  - "**free-port on Linux** — no longer trusts an empty `lsof` result; combines lsof, ss, fuser, and `/proc` socket discovery so busy ports are actually freed"
+  - "**serve -d reliability** — waits for the control plane before reporting success; idempotent when already running; prints the correct `--config` attach/down hints"
+  - "**Windows build** — `portInUseProbe` shared across platforms; procfs tests gated to Unix so Windows test compile succeeds"
+
+changes:
+  - "Control plane expansions for attach (logs, mark, color, order, highlight-errors, down)"
+  - "AGENTS.md / README / skill docs for serve, attach, live reload, and web bind defaults"
+  - "Release notes can be declared in `releases/<tag>.yaml` instead of only commit subjects"

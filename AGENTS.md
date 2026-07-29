@@ -15,6 +15,8 @@ ui:
   max_log_lines: 10000
   word_wrap: false
   highlight_errors: false
+  web_host: "0.0.0.0"
+  web_port: 52911
 
 processes:
   process-name:
@@ -43,7 +45,9 @@ processes:
 - `max_log_lines`: non-negative integer per process. Zero or omission uses the default of `10000`.
 - `word_wrap`: boolean. Initial word-wrap state for log lines in both the TUI and the web viewer. Either can toggle it at runtime (TUI key `W`, web `wrap` checkbox); the toggle is not written back to the file. Omission means `false` (long lines are truncated in the TUI, horizontally scrolled in the web viewer).
 - `highlight_errors`: boolean. When `true`, each captured output line is matched against built-in error patterns (Python tracebacks/exceptions, Go `panic:`/`fatal error:`, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL`/`CRITICAL` levels). A match turns the process status orange with a `!` badge in the TUI list and the web sidebar even while the process keeps running, and the log title shows the count. The badge clears on restart or when the user inserts a mark (`space`/`m`, or the web Mark buttons). Cost is one regex match per log line, so it is safe to enable on modest machines; omission means `false` (no matching at all). The web viewer's `error badge` checkbox toggles this at runtime and rewrites the value in this file.
-- Do not add fields other than `wheel_lines`, `copy_on_release`, `max_log_lines`, `word_wrap`, and `highlight_errors`.
+- `web_host`: optional bind address for the on-demand web log viewer (TUI key `w`). Omission means `0.0.0.0` so a Stacker on a remote server is reachable from other hosts. Use `"127.0.0.1"` to keep it local-only. Quote the value if it starts with digits only is not needed; prefer a plain string. Hostnames and IPv4/IPv6 addresses are accepted.
+- `web_port`: optional TCP port (`1`–`65535`) for the web viewer. Omission or `0` means `52911`. If that port is busy, Stacker falls back to an ephemeral free port on the same host and shows the actual URL in the status line.
+- Do not add fields other than `wheel_lines`, `copy_on_release`, `max_log_lines`, `word_wrap`, `highlight_errors`, `web_host`, and `web_port`.
 
 ### Process fields
 
@@ -104,24 +108,28 @@ tasks:
 
 ### CLI (control plane)
 
-While the TUI is running for a given config, AI agents and scripts should use the CLI instead of starting services in parallel:
+While a Stacker instance is running for a given config, AI agents and scripts should use the CLI instead of starting services in parallel:
 
 ```bash
-stacker -config stacker.yml              # start TUI + control plane
+stacker -config stacker.yml              # session: TUI + control plane
+stacker serve                            # headless supervisor
+stacker serve -d                         # daemonize headless supervisor
+stacker attach                           # TUI attach to serve (q detaches)
+stacker down                             # stop all processes + supervisor
 stacker ping                             # is an instance running?
 stacker list --json                      # process names and status
 stacker start backend
 stacker stop backend
 stacker restart backend
-stacker free-port 8000                   # works even without the TUI
+stacker free-port 8000                   # works even without an instance
 stacker tasks                            # list one-shot tasks per process
 stacker run backend migrate              # run a one-shot task
 stacker version                          # print binary version (-v, --version)
 ```
 
-Only one TUI instance is allowed per absolute config path. The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
+Only one instance is allowed per absolute config path (`session` or `serve`). The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir). Edits to `stacker.yml` while running are hot-reloaded (add/remove/reorder); running processes removed from YAML stay until stopped.
 
-Pressing `w` in the TUI toggles a separate web log viewer on `127.0.0.1` with a random high port (off by default, no restart needed). The log page header shows only the main actions (Start, Stop, Restart, and Free port when the process has `port:` set); everything else (copy, marks, auto-refresh, wrap, error badge, color selector, raw link) lives in the `More ▾` menu. Routes: `GET /` (process index), `GET /logs/{name}` (HTML page), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses, colors, and error counts; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/free-port` (kill listeners on the configured port; 400 when the process has no `port:`), `POST /api/{name}/task` with body `{"name": "migrate"}` (run a one-shot task; output streams into the log; 404 for an unknown task), `POST /api/{name}/mark` (append a timestamped separator to the logs), `POST /api/{name}/color` with body `{"color": "#38bdf8"}` (set the process dot color and rewrite it in `stacker.yml`; empty string removes it), `POST /api/order` with body `{"names": [...]}` (reorder the process list — must be a permutation of all names; rewrites the mapping order in `stacker.yml` and the TUI follows), `POST /api/highlight-errors` with body `{"enabled": true}` (toggle error detection and persist `ui.highlight_errors`), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs, `m` marks every running process, `t` opens the one-shot task picker, `W` toggles word wrap, `c` cycles the selected process's color, `shift+↑/↓` moves the selected process in the list (saved to the YAML), and `?` opens the key help overlay.
+Pressing `w` in the TUI toggles a separate web log viewer on `0.0.0.0:52911` by default (overridable via `ui.web_host` / `ui.web_port`; off by default, no restart needed). On headless/SSH sessions Stacker skips `xdg-open` and only copies/shows the URL. The log page header shows only the main actions (Start, Stop, Restart, and Free port when the process has `port:` set); everything else (copy, marks, auto-refresh, wrap, error badge, color selector, raw link) lives in the `More ▾` menu. Routes: `GET /` (process index), `GET /logs/{name}` (HTML page), `GET /logs/{name}/raw` (plain text), `GET /api/{name}/tail?from=N` (incremental logs + all process statuses, colors, and error counts; `nolines=1` for statuses only), `POST /api/{name}/{start|stop|restart}`, `POST /api/{name}/free-port` (kill listeners on the configured port; 400 when the process has no `port:`), `POST /api/{name}/task` with body `{"name": "migrate"}` (run a one-shot task; output streams into the log; 404 for an unknown task), `POST /api/{name}/mark` (append a timestamped separator to the logs), `POST /api/{name}/color` with body `{"color": "#38bdf8"}` (set the process dot color and rewrite it in `stacker.yml`; empty string removes it), `POST /api/order` with body `{"names": [...]}` (reorder the process list — must be a permutation of all names; rewrites the mapping order in `stacker.yml` and the TUI follows), `POST /api/highlight-errors` with body `{"enabled": true}` (toggle error detection and persist `ui.highlight_errors`), and `POST /api/mark-all` (separator on every running process). Turning it on copies the URL of the selected process's log page and opens it in the default browser; pressing `w` again shuts it down. In the TUI, `space` appends the same separator to the selected process's logs, `m` marks every running process, `t` opens the one-shot task picker, `W` toggles word wrap, `c` cycles the selected process's color, `shift+↑/↓` moves the selected process in the list (saved to the YAML), and `?` opens the key help overlay.
 
 ### Agent skills (multi-tool)
 

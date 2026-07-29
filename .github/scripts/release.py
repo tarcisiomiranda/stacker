@@ -106,6 +106,16 @@ CHANGELOG_SECTIONS = (
 )
 CONVENTIONAL_PREFIX = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?!?:\s*(?P<subject>.+)$")
 
+# Hand-written release notes live under releases/<tag>.yaml (preferred over commits).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+NOTES_YAML_KEYS = ("features", "fixes", "changes", "breaking")
+NOTES_YAML_HEADINGS = {
+    "features": "### Features",
+    "fixes": "### Fixes",
+    "changes": "### Changes",
+    "breaking": "### Breaking changes",
+}
+
 
 def git_output(*args: str) -> str:
     """Run a git command and return its stdout."""
@@ -117,6 +127,19 @@ def git_output(*args: str) -> str:
         timeout=60,
     )
     return result.stdout
+
+
+def previous_semver_tag(tag: str) -> str | None:
+    """Return the SemVer tag immediately before `tag` (or the latest if tag is new)."""
+    tags = [
+        line.strip()
+        for line in git_output("tag", "--sort=-v:refname").splitlines()
+        if TAG_PATTERN.fullmatch(line.strip())
+    ]
+    if tag in tags:
+        newer = tags[tags.index(tag) + 1 :]
+        return newer[0] if newer else None
+    return tags[0] if tags else None
 
 
 def changelog_commits(tag: str) -> tuple[str | None, list[str]]:
@@ -147,6 +170,171 @@ def changelog_commits(tag: str) -> tuple[str | None, list[str]]:
         if line.strip()
     ]
     return previous, subjects
+
+
+def notes_path_for_tag(tag: str, root: Path | None = None) -> Path | None:
+    """Return releases/<tag>.yaml or .yml if it exists."""
+    base = root if root is not None else REPO_ROOT
+    for name in (f"{tag}.yaml", f"{tag}.yml"):
+        path = base / "releases" / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _unquote_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def parse_release_notes_yaml(text: str) -> dict[str, Any]:
+    """Parse the restricted release-notes YAML dialect (stdlib only).
+
+    Supported:
+      key: scalar
+      key: |
+        multiline
+      key:
+        - list item
+        - "quoted: item"
+      # comments and blank lines
+    """
+    result: dict[str, Any] = {}
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        raw = lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        key_match = re.match(r"^([A-Za-z_][\w]*)\s*:\s*(.*)$", raw)
+        if not key_match:
+            i += 1
+            continue
+
+        key = key_match.group(1)
+        val = key_match.group(2).rstrip()
+        i += 1
+
+        if val in ("|", ">"):
+            block: list[str] = []
+            while i < n:
+                nxt = lines[i]
+                if not nxt.strip():
+                    block.append("")
+                    i += 1
+                    continue
+                if nxt.startswith("#") and not nxt.startswith(" "):
+                    break
+                if nxt.startswith(" ") or nxt.startswith("\t"):
+                    if nxt.startswith("  "):
+                        block.append(nxt[2:])
+                    else:
+                        block.append(nxt.lstrip())
+                    i += 1
+                    continue
+                break
+            # Trim trailing empty lines from the block.
+            while block and block[-1] == "":
+                block.pop()
+            if val == "|":
+                result[key] = "\n".join(block)
+            else:
+                result[key] = " ".join(part.strip() for part in block if part.strip())
+            continue
+
+        if val != "":
+            result[key] = _unquote_yaml_scalar(val)
+            continue
+
+        # Expect a list under this key.
+        items: list[str] = []
+        while i < n:
+            nxt = lines[i]
+            if not nxt.strip() or nxt.strip().startswith("#"):
+                i += 1
+                continue
+            item_match = re.match(r"^\s*-\s+(.*)$", nxt)
+            if not item_match:
+                break
+            items.append(_unquote_yaml_scalar(item_match.group(1)))
+            i += 1
+        result[key] = items
+
+    return result
+
+
+def load_release_notes_file(path: Path) -> dict[str, Any]:
+    """Load release notes from a YAML file."""
+    text = path.read_text(encoding="utf-8")
+    # Prefer PyYAML when available (fuller grammar); fall back to the dialect parser.
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return parse_release_notes_yaml(text)
+
+
+def build_release_body_from_notes(
+    data: dict[str, Any],
+    previous: str | None,
+    tag: str,
+    repository: str,
+) -> str:
+    """Build Markdown release notes from a releases/<tag>.yaml document."""
+    if data.get("tag") not in (None, "", tag):
+        raise ValueError(
+            f"releases notes tag {data.get('tag')!r} does not match release tag {tag!r}"
+        )
+
+    title = str(data.get("title") or "What's new").strip() or "What's new"
+    lines = [f"## {title}"]
+
+    highlights = data.get("highlights")
+    if isinstance(highlights, str) and highlights.strip():
+        lines.append("")
+        lines.append(highlights.strip())
+
+    for key in NOTES_YAML_KEYS:
+        items = data.get(key)
+        if not items:
+            continue
+        if isinstance(items, str):
+            items = [items]
+        if not isinstance(items, list):
+            continue
+        cleaned = [str(item).strip() for item in items if str(item).strip()]
+        if not cleaned:
+            continue
+        lines.append("")
+        lines.append(NOTES_YAML_HEADINGS[key])
+        lines.extend(f"- {item}" for item in cleaned)
+
+    prev = data.get("previous")
+    if isinstance(prev, str) and prev.strip():
+        previous = prev.strip()
+
+    if previous:
+        lines.append("")
+        lines.append(
+            f"**Full changelog**: https://github.com/{repository}/compare/{previous}...{tag}"
+        )
+
+    body = "\n".join(lines).rstrip() + "\n"
+    # Need at least title + something, or title alone is weak but ok if highlights/sections exist.
+    if body.strip() == f"## {title}":
+        raise ValueError(f"release notes file for {tag} has no content sections")
+    return body
 
 
 def build_release_body(
@@ -183,8 +371,30 @@ def build_release_body(
     return "\n".join(lines) + "\n"
 
 
-def release_notes(tag: str, repository: str) -> str | None:
-    """Generate release notes from commit messages; never fail the release."""
+def release_notes(tag: str, repository: str, root: Path | None = None) -> str | None:
+    """Build release notes: prefer releases/<tag>.yaml, else conventional commits."""
+    notes_file = notes_path_for_tag(tag, root=root)
+    if notes_file is not None:
+        try:
+            data = load_release_notes_file(notes_file)
+            try:
+                previous = previous_semver_tag(tag)
+            except (OSError, subprocess.SubprocessError):
+                previous = None
+            body = build_release_body_from_notes(data, previous, tag, repository)
+            try:
+                display = notes_file.relative_to(root or REPO_ROOT)
+            except ValueError:
+                display = notes_file
+            print(f"Using release notes from {display}")
+            return body
+        except (OSError, ValueError, TypeError) as error:
+            print(
+                f"WARNING: could not load release notes from {notes_file}: {error}",
+                file=sys.stderr,
+            )
+            # Fall through to commits rather than failing the whole release.
+
     try:
         previous, subjects = changelog_commits(tag)
         return build_release_body(subjects, previous, tag, repository)

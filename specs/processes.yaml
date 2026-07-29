@@ -1,7 +1,7 @@
-last_updated: 2026-07-23
+last_updated: 2026-07-28
 
 domain: processes
-description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, and terminal UI.
+description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, and terminal UI.
 
 models:
   - name: Config
@@ -33,15 +33,31 @@ rest:
       path: cmd/stacker/control.go
     - name: GET /v1/processes/{name}/status
       path: cmd/stacker/control.go
+    - name: GET /v1/processes/{name}/logs
+      path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/start
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/stop
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/restart
       path: cmd/stacker/control.go
+    - name: POST /v1/processes/{name}/mark
+      path: cmd/stacker/control.go
+    - name: POST /v1/processes/{name}/color
+      path: cmd/stacker/control.go
+    - name: POST /v1/processes/{name}/free-port
+      path: cmd/stacker/control.go
     - name: POST /v1/free-port
       path: cmd/stacker/control.go
     - name: POST /v1/tasks/{process}/{task}
+      path: cmd/stacker/control.go
+    - name: POST /v1/mark-all
+      path: cmd/stacker/control.go
+    - name: POST /v1/order
+      path: cmd/stacker/control.go
+    - name: POST /v1/highlight-errors
+      path: cmd/stacker/control.go
+    - name: POST /v1/down
       path: cmd/stacker/control.go
     - name: GET /
       path: cmd/stacker/web.go
@@ -80,6 +96,10 @@ frontend:
       path: cmd/stacker/main.go
     - name: Log panel
       path: cmd/stacker/main.go
+    - name: Help overlay
+      path: cmd/stacker/main.go
+    - name: Attach TUI
+      path: cmd/stacker/attach.go
     - name: Web log viewer (index + logs page)
       path: cmd/stacker/web.go
   types: []

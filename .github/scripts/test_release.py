@@ -30,6 +30,75 @@ class ValidateTagTests(unittest.TestCase):
                     release.validate_tag(tag)
 
 
+class YamlNotesTests(unittest.TestCase):
+    def test_parse_release_notes_yaml_dialect(self) -> None:
+        text = """
+# comment
+highlights: |
+  Background serve and live reload.
+
+features:
+  - first feature
+  - "second: with colon"
+
+fixes:
+  - free-port on Linux
+
+previous: v0.9.0
+"""
+        data = release.parse_release_notes_yaml(text)
+        self.assertIn("Background serve", data["highlights"])
+        self.assertEqual(data["features"], ["first feature", "second: with colon"])
+        self.assertEqual(data["fixes"], ["free-port on Linux"])
+        self.assertEqual(data["previous"], "v0.9.0")
+
+    def test_build_body_from_notes(self) -> None:
+        body = release.build_release_body_from_notes(
+            {
+                "highlights": "Big release.",
+                "features": ["Serve + attach", "Live YAML reload"],
+                "fixes": ["Windows portInUseProbe"],
+                "changes": ["CLI --config examples"],
+            },
+            "v0.9.0",
+            "v0.10.0",
+            "owner/stacker",
+        )
+        self.assertIn("## What's new", body)
+        self.assertIn("Big release.", body)
+        self.assertIn("### Features\n- Serve + attach\n- Live YAML reload", body)
+        self.assertIn("### Fixes\n- Windows portInUseProbe", body)
+        self.assertIn("### Changes\n- CLI --config examples", body)
+        self.assertIn(
+            "https://github.com/owner/stacker/compare/v0.9.0...v0.10.0",
+            body,
+        )
+
+    def test_notes_file_preferred_over_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            notes_dir = root / "releases"
+            notes_dir.mkdir()
+            (notes_dir / "v0.10.0.yaml").write_text(
+                "features:\n  - from yaml file\n",
+                encoding="utf-8",
+            )
+            body = release.release_notes("v0.10.0", "owner/stacker", root=root)
+            self.assertIsNotNone(body)
+            assert body is not None
+            self.assertIn("from yaml file", body)
+            self.assertIn("### Features", body)
+
+    def test_rejects_mismatched_tag_field(self) -> None:
+        with self.assertRaises(ValueError):
+            release.build_release_body_from_notes(
+                {"tag": "v0.9.0", "features": ["x"]},
+                None,
+                "v0.10.0",
+                "owner/stacker",
+            )
+
+
 class ReleaseBodyTests(unittest.TestCase):
     def test_groups_conventional_commits(self) -> None:
         body = release.build_release_body(

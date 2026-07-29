@@ -5,10 +5,55 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWebPublicBaseURLRewritesWildcard(t *testing.T) {
+	got := webPublicBaseURL("0.0.0.0:52911")
+	if !strings.HasPrefix(got, "http://") || !strings.HasSuffix(got, ":52911") {
+		t.Fatalf("unexpected public URL %q", got)
+	}
+	if strings.Contains(got, "0.0.0.0") {
+		t.Fatalf("public URL should not keep 0.0.0.0: %q", got)
+	}
+	local := webPublicBaseURL("127.0.0.1:52911")
+	if local != "http://127.0.0.1:52911" {
+		t.Fatalf("local URL = %q", local)
+	}
+}
+
+func TestListenWebDefaultPort(t *testing.T) {
+	ln, err := listenWeb(UIConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port == "" || port == "0" {
+		t.Fatalf("empty port: %q", port)
+	}
+}
+
+func TestCanOpenBrowserHeadlessLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only env probe")
+	}
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	if canOpenBrowser() {
+		t.Fatal("expected canOpenBrowser false without display")
+	}
+	t.Setenv("DISPLAY", ":0")
+	if !canOpenBrowser() {
+		t.Fatal("expected canOpenBrowser true with DISPLAY")
+	}
+}
 
 func TestWebColorEndpointUpdatesProcessAndConfig(t *testing.T) {
 	dir := t.TempDir()

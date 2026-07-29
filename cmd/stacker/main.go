@@ -96,6 +96,13 @@ type UIConfig struct {
 	// badge orange in the TUI and web viewer even while it keeps running.
 	// Off by default; the cost is one regex match per log line.
 	HighlightErrors bool `yaml:"highlight_errors"`
+	// WebHost is the bind address for the on-demand web log viewer (key `w`).
+	// Empty means 0.0.0.0 so remote browsers can reach a server-side Stacker.
+	WebHost string `yaml:"web_host"`
+	// WebPort is the TCP port for the web viewer. Empty/0 means 52911.
+	// Set to a free high port if 52911 is taken; the listener falls back to an
+	// ephemeral port when the preferred one is busy.
+	WebPort int `yaml:"web_port"`
 }
 
 type ProcessConfig struct {
@@ -131,6 +138,9 @@ type Process struct {
 	// exit, so a clean exit reads as "idle", not a stopped service, and it is
 	// excluded from process-only features (reorder, color persistence).
 	oneShot bool
+	// orphaned is set when the process was removed from stacker.yml while
+	// still running; it stays listed until it stops, then is pruned.
+	orphaned bool
 
 	mu sync.Mutex
 	// detectErrors mirrors ui.highlight_errors; toggled at runtime via the
@@ -276,6 +286,9 @@ func (p *Process) Start(notify func()) error {
 		}
 		if len(killed) > 0 {
 			p.appendLog(fmt.Sprintf("[stacker] freed port %d (killed pids=%v)", port, killed))
+			notify()
+		} else {
+			p.appendLog(fmt.Sprintf("[stacker] port %d free", port))
 			notify()
 		}
 	}
@@ -591,8 +604,9 @@ type copiedMsg struct {
 	err   error
 }
 type webMsg struct {
-	url string
-	err error
+	url            string
+	err            error
+	skippedBrowser bool // true when no GUI / xdg-open skipped (SSH servers)
 }
 type colorSavedMsg struct {
 	name  string
@@ -629,12 +643,28 @@ type model struct {
 	// TUI goroutine on the next refresh (it owns `selected`).
 	pendingMu    sync.Mutex
 	pendingOrder []string
+	// pendingConfig is a reloaded stacker.yml applied on the next refresh.
+	pendingConfig     *Config
+	pendingConfigHash string
+	pendingConfigErr  string
+	// configHash is the last successfully applied file content hash.
+	hashMu     sync.Mutex
+	configHash string
+	// watchStop ends the config file poller.
+	watchStop chan struct{}
 	// hlErr mirrors ui.highlight_errors; toggled at runtime from the web.
 	hlErr atomic.Bool
 	// numProcesses is the count of real (service) processes at the front of
-	// m.processes; standalone one-shot tasks follow. Reorder and color
-	// persistence apply only to the process prefix.
+	// m.processes (YAML order, non-orphaned); orphaned services and
+	// standalone tasks follow. Reorder and color persistence apply only to
+	// this prefix.
 	numProcesses int
+	// mode is "session" (TUI owns lifecycle) or "serve" (headless daemon).
+	mode string
+	// shutdown is closed to request supervisor exit (serve or /v1/down).
+	shutdown chan struct{}
+	// attachMode is true when this TUI is a remote attach client (q detaches).
+	attachMode bool
 }
 
 // orderedNames returns the display order: the YAML key order when known,
@@ -692,7 +722,18 @@ func newModel(cfg Config) *model {
 	if cfg.UI.WheelLines <= 0 {
 		cfg.UI.WheelLines = 3
 	}
-	m := &model{cfg: cfg, selected: -1, follow: true, wrap: cfg.UI.WordWrap, selStart: -1, selEnd: -1, refreshCh: make(chan struct{}, 1)}
+	m := &model{
+		cfg:       cfg,
+		selected:  -1,
+		follow:    true,
+		wrap:      cfg.UI.WordWrap,
+		selStart:  -1,
+		selEnd:    -1,
+		refreshCh: make(chan struct{}, 1),
+		watchStop: make(chan struct{}),
+		shutdown:  make(chan struct{}),
+		mode:      "session",
+	}
 	m.hlErr.Store(cfg.UI.HighlightErrors)
 	names := orderedNames(cfg)
 	for _, name := range names {
@@ -776,6 +817,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case refreshMsg:
 		m.applyPendingOrder()
+		m.applyPendingConfig()
+		m.pruneOrphans()
 		if m.follow {
 			m.scrollToBottom()
 		}
@@ -796,9 +839,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Nothing selected to copy"
 		}
 	case webMsg:
-		if msg.err != nil {
-			m.statusText = "Web logs: " + msg.url + " (browser failed: " + msg.err.Error() + ")"
-		} else {
+		switch {
+		case msg.err != nil:
+			// Keep the URL front and center — on servers xdg-open is expected to fail.
+			m.statusText = "Web logs: " + msg.url + " (URL copied; open in browser — " + msg.err.Error() + ")"
+		case msg.skippedBrowser:
+			m.statusText = "Web logs: " + msg.url + " (URL copied; open in your browser)"
+		default:
 			m.statusText = "Web logs: " + msg.url + " (URL copied, browser opened)"
 		}
 	case colorSavedMsg:
@@ -885,7 +932,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.web = ws
-			target := "http://" + ws.Addr() + "/"
+			target := webPublicBaseURL(ws.Addr()) + "/"
 			if p := m.current(); p != nil {
 				target = webLogsURL(ws.Addr(), p.Name)
 			}
@@ -1219,6 +1266,9 @@ func (m *model) processList() string {
 			dotWidth = 2
 		}
 		name := sanitizeLogLine(p.Name)
+		if p.orphaned {
+			name = name + " ⚠"
+		}
 		contentWidth := max(1, m.leftWidth()-5)
 		nameWidth := max(1, contentWidth-len(status)-1-dotWidth-markerWidth)
 		name = truncate(name, nameWidth)
@@ -1551,6 +1601,9 @@ func (m *model) openWebCmd(target string) tea.Cmd {
 	return func() tea.Msg {
 		// Copy the URL so it can be pasted even if no browser opens (e.g. SSH).
 		_ = copyToClipboard(target)
+		if !canOpenBrowser() {
+			return webMsg{url: target, skippedBrowser: true}
+		}
 		if err := openBrowser(target); err != nil {
 			return webMsg{url: target, err: err}
 		}
@@ -1605,6 +1658,9 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.UI.MaxLogLines < 0 {
 		return Config{}, errors.New("ui.max_log_lines cannot be negative")
+	}
+	if cfg.UI.WebPort < 0 || cfg.UI.WebPort > 65535 {
+		return Config{}, errors.New("ui.web_port must be between 0 and 65535 (0 = default 52911)")
 	}
 
 	configDir, err := filepath.Abs(filepath.Dir(path))
@@ -1709,23 +1765,51 @@ func main() {
 		os.Exit(runCLI(configPath, rest))
 	}
 
+	// Bare `stacker` with a running serve instance attaches the TUI.
+	// If the default stacker.yml is not running but exactly one serve is up
+	// (e.g. --config codebunker.yml serve -d), attach to that one.
+	if st, used, fallback, err := resolveRunningInstance(configPath); err == nil && st != nil && st.Mode == "serve" {
+		if fallback {
+			fmt.Fprintf(os.Stderr, "note: attaching to only running config %s\n", used)
+		}
+		os.Exit(runAttach(used))
+	}
+
+	os.Exit(runSession(configPath))
+}
+
+// runSession starts supervisor + TUI in one process (default interactive mode).
+// q / ctrl+c stops every process and exits.
+func runSession(configPath string) int {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
 	m := newModel(cfg)
+	m.mode = "session"
 	control, err := startControlServer(m, configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "control plane error:", err)
-		os.Exit(1)
+		return 1
 	}
 	defer control.Close()
 	m.configPath = control.config
+	m.startConfigWatcher()
+	defer m.stopConfigWatcher()
+
+	// /v1/down from CLI cancels the TUI context path via shutdown.
+	go func() {
+		select {
+		case <-m.shutdown:
+			stopSignals()
+		case <-ctx.Done():
+		}
+	}()
 
 	program := tea.NewProgram(
 		m,
@@ -1740,8 +1824,9 @@ func main() {
 	m.stopAll()
 	if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, tea.ErrProgramKilled)) {
 		fmt.Fprintln(os.Stderr, "stacker error:", runErr)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // parseArgs extracts -config and leaves CLI subcommands in rest.

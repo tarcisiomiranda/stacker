@@ -39,6 +39,31 @@ func runCLI(configPath string, args []string) int {
 			fmt.Printf("stacker %s\n", resolveVersion())
 		}
 		return 0
+	case "serve":
+		background, withWeb := false, false
+		for _, a := range rest {
+			switch a {
+			case "-d", "--background", "--daemon":
+				background = true
+			case "--web":
+				withWeb = true
+			case "-h", "--help":
+				fmt.Print(`Usage: stacker serve [-d|--background] [--web]
+
+  Start a headless supervisor (no TUI). Processes keep running until
+  stacker down or SIGTERM.
+
+  -d, --background   daemonize (re-exec in background)
+  --web              start the web log viewer immediately
+`)
+				return 0
+			}
+		}
+		return runServe(configPath, background, withWeb)
+	case "attach", "a":
+		return runAttach(configPath)
+	case "down":
+		return runDown(configPath, jsonOut)
 	case "ping":
 		return cliPing(configPath, jsonOut)
 	case "list", "ls":
@@ -93,13 +118,16 @@ func runCLI(configPath string, args []string) int {
 }
 
 func printCLIHelp() {
-	fmt.Print(`Stacker CLI — control a running Stacker TUI instance
+	fmt.Print(`Stacker CLI — control a running Stacker instance
 
 Usage:
-  stacker [-config path]                  Start the TUI (control plane)
-  stacker [-config path] <command> [args] Talk to a running instance
+  stacker [--config path]                  Start the TUI (session mode)
+  stacker [--config path] <command> [args] Talk to a running instance
 
 Commands:
+  serve [-d] [--web]   Headless supervisor (background with -d)
+  attach, a            Attach TUI to a running serve instance
+  down                 Stop all processes and shut down the supervisor
   ping                 Check if Stacker is running for this config
   list                 List configured processes and their status
   status [name]        Status of all processes, or one by name
@@ -112,15 +140,21 @@ Commands:
   version              Print the Stacker version (-v, --version)
 
 Flags:
-  -config path         Path to stacker.yml (default: stacker.yml)
-  --json               Machine-readable JSON output (for AI agents)
+  --config path, -config path   Path to stacker.yml (default: stacker.yml in cwd)
+  --json                        Machine-readable JSON output (for AI agents)
+
+The --config path identifies the instance. serve, attach, list, start, down, …
+must all use the same path (default is ./stacker.yml relative to where you run the command).
 
 Examples:
-  stacker -config ./stacker.yml
-  stacker list --json
-  stacker restart backend
-  stacker free-port 8000
-  stacker run backend migrate
+  stacker --config ./stacker.yml              # session TUI
+  stacker --config ./stacker.yml serve -d     # headless in background
+  stacker --config ./stacker.yml a            # reattach TUI (short for attach)
+  stacker --config ./stacker.yml list --json
+  stacker --config ./stacker.yml restart backend
+  stacker --config ./stacker.yml down
+  stacker free-port 8000                      # no instance required
+  stacker --config ./stacker.yml run backend migrate
 `)
 }
 

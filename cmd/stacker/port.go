@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -24,11 +27,18 @@ func freePort(port int) ([]int, error) {
 	for round := 0; round < 3; round++ {
 		pids, err := listenersOnPort(port)
 		if err != nil {
+			// Still in use but we could not map a PID — do not pretend success.
 			return killed, err
 		}
 		pids = filterSelf(pids, self)
 		if len(pids) == 0 {
-			return killed, nil
+			// Double-check: tools said free; probe may still see a race.
+			if !portInUseProbe(port) {
+				return killed, nil
+			}
+			// Port still answers — wait a moment and re-list.
+			waitPortReleased(port, self, 500*time.Millisecond)
+			continue
 		}
 		for _, pid := range pids {
 			if err := terminatePID(pid); err != nil {
@@ -43,6 +53,9 @@ func freePort(port int) ([]int, error) {
 		waitPortReleased(port, self, 2*time.Second)
 	}
 
+	if !portInUseProbe(port) {
+		return killed, nil
+	}
 	remaining, err := listenersOnPort(port)
 	if err != nil {
 		return killed, err
@@ -50,7 +63,7 @@ func freePort(port int) ([]int, error) {
 	if remaining = filterSelf(remaining, self); len(remaining) > 0 {
 		return killed, fmt.Errorf("port %d is still in use by pids %v (a supervisor may keep restarting the listener)", port, remaining)
 	}
-	return killed, nil
+	return killed, fmt.Errorf("port %d is still in use after freeing pids %v", port, killed)
 }
 
 func waitPortReleased(port, self int, timeout time.Duration) {
@@ -125,4 +138,39 @@ func parseInt(s string) (int, error) {
 		n = n*10 + int(c-'0')
 	}
 	return n, nil
+}
+
+// portInUseProbe checks whether anything accepts on the port. A plain TCP
+// dial/bind works on Linux, macOS, and Windows. We try several addresses
+// because a process may listen only on 0.0.0.0, ::, or a loopback interface.
+func portInUseProbe(port int) bool {
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+	}
+	for _, network := range []string{"tcp4", "tcp6"} {
+		ln, err := net.Listen(network, net.JoinHostPort("", strconv.Itoa(port)))
+		if err == nil {
+			ln.Close()
+			continue
+		}
+		if isAddrInUse(err) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAddrInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	// Linux/macOS: "address already in use"
+	// Windows: "Only one usage of each socket address..."
+	return strings.Contains(s, "address already in use") ||
+		strings.Contains(s, "Only one usage of each socket address")
 }
