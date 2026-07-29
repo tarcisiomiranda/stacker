@@ -676,6 +676,16 @@ var (
 	runningStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	failedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	errorBadgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	// keycapStyle is the keyboard-key chip used in the footer and help overlay.
+	keycapStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("238")).
+			Bold(true).
+			Padding(0, 1)
+	// helpSectionStyle labels groups inside the help overlay.
+	helpSectionStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("110")).
+				Bold(true)
 )
 
 func newModel(cfg Config) *model {
@@ -995,42 +1005,109 @@ func (m *model) View() string {
 	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	footer := mutedStyle.Render("? help • q quit")
+	// Primary actions stay fixed in the footer so stop/restart/free-port/web
+	// are always one glance away; full map lives under `?`.
+	footer := m.footerView()
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
 	return body + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
 }
 
-// helpView is the full key reference; the footer only advertises `?` so it
-// never overflows narrow terminals.
-func (m *model) helpView() string {
-	rows := [][2]string{
-		{"↑/k ↓/j", "select process"},
-		{"shift+↑/↓", "move process (saved to YAML)"},
-		{"enter", "start (▶ tasks: run once)"},
-		{"s", "stop"},
-		{"r", "restart"},
-		{"f", "free port"},
-		{"space", "mark selected"},
-		{"m", "mark all running"},
-		{"t", "run a task (one-shot command)"},
-		{"W", "toggle word wrap"},
-		{"c", "cycle color (saved to YAML)"},
-		{"w", "web log viewer on/off"},
-		{"wheel", "scroll logs"},
-		{"drag", "select lines (copy)"},
-		{"pgup/pgdn", "page logs"},
-		{"G / end", "follow bottom"},
-		{"esc", "clear selection"},
-		{"q / ctrl+c", "quit"},
+// keycap renders a keyboard shortcut as a small chip, e.g. [s].
+func keycap(key string) string {
+	return keycapStyle.Render(key)
+}
+
+// footerView is the always-visible primary-action bar.
+func (m *model) footerView() string {
+	// Compact chips for the four fixed process actions + help/quit.
+	parts := []string{
+		keycap("s") + " stop",
+		keycap("r") + " restart",
+		keycap("f") + " free port",
+		keycap("w") + " web",
+		keycap("?") + " help",
+		keycap("q") + " quit",
 	}
+	return strings.Join(parts, mutedStyle.Render(" · "))
+}
+
+// helpView is the full key reference with keycap chips, grouped by role.
+func (m *model) helpView() string {
+	type section struct {
+		title string
+		rows  [][2]string
+	}
+	sections := []section{
+		{
+			title: "Primary",
+			rows: [][2]string{
+				{"s", "stop selected process"},
+				{"r", "restart selected process"},
+				{"f", "free configured port"},
+				{"w", "web log viewer on/off"},
+			},
+		},
+		{
+			title: "Process",
+			rows: [][2]string{
+				{"↑/k ↓/j", "select process"},
+				{"shift+↑/↓", "move process (saved to YAML)"},
+				{"enter", "start (▶ tasks: run once)"},
+				{"t", "run a task (one-shot command)"},
+				{"c", "cycle color (saved to YAML)"},
+			},
+		},
+		{
+			title: "Logs",
+			rows: [][2]string{
+				{"space", "mark selected"},
+				{"m", "mark all running"},
+				{"W", "toggle word wrap"},
+				{"wheel", "scroll logs"},
+				{"drag", "select lines (copy)"},
+				{"pgup/pgdn", "page logs"},
+				{"G / end", "follow bottom"},
+				{"esc", "clear selection"},
+			},
+		},
+		{
+			title: "App",
+			rows: [][2]string{
+				{"?", "this help"},
+				{"q / ctrl+c", "quit"},
+			},
+		},
+	}
+
+	// Pad keycaps to a shared width so descriptions line up.
+	keyWidth := 0
+	for _, sec := range sections {
+		for _, row := range sec.rows {
+			if w := ansi.StringWidth(row[0]); w > keyWidth {
+				keyWidth = w
+			}
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Keys"))
-	b.WriteString("\n\n")
-	for _, row := range rows {
-		pad := max(1, 12-ansi.StringWidth(row[0]))
-		b.WriteString(row[0] + strings.Repeat(" ", pad) + row[1] + "\n")
+	b.WriteString(titleStyle.Render("Keyboard shortcuts"))
+	b.WriteString("\n")
+	for i, sec := range sections {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(helpSectionStyle.Render(sec.title))
+		b.WriteString("\n")
+		for _, row := range sec.rows {
+			pad := max(0, keyWidth-ansi.StringWidth(row[0]))
+			// Extra spaces go after the keycap so chips stay tight.
+			b.WriteString(keycap(row[0]))
+			b.WriteString(strings.Repeat(" ", pad+2))
+			b.WriteString(row[1])
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("press any key to close"))
