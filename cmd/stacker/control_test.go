@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -381,4 +382,115 @@ processes:
 	if err != nil || st2 == nil || fallback2 {
 		t.Fatalf("direct resolve: st=%v fallback=%v err=%v", st2, fallback2, err)
 	}
+}
+
+// A headless supervisor has no TUI, so the web viewer can only be toggled
+// through the control plane. Without this endpoint `w` in attach has nothing to
+// call and the viewer is unreachable for the whole life of the daemon.
+func TestControlPlaneWebToggle(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeConfig(t, dir, `
+version: 1
+processes:
+  demo:
+    command: true
+`)
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	m := newModel(cfg)
+	m.mode = "serve"
+	cs, err := startControlServer(m, cfgPath)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	defer cs.Close()
+
+	st, err := findRunningInstance(cfgPath)
+	if err != nil || st == nil {
+		t.Fatalf("findRunningInstance: st=%v err=%v", st, err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Post("http://"+st.Addr+"/v1/web", "application/json",
+		strings.NewReader(`{"enabled": true}`))
+	if err != nil {
+		t.Fatalf("enable web: %v", err)
+	}
+	var on struct {
+		OK      bool   `json:"ok"`
+		Enabled bool   `json:"enabled"`
+		Addr    string `json:"addr"`
+		Error   string `json:"error"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&on)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("decode enable: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK || !on.OK || !on.Enabled || on.Addr == "" {
+		t.Fatalf("enable web: status=%d resp=%+v", resp.StatusCode, on)
+	}
+
+	// The reported address must be a live listener, not just a bookkeeping flag.
+	_, port, err := net.SplitHostPort(on.Addr)
+	if err != nil {
+		t.Fatalf("addr %q: %v", on.Addr, err)
+	}
+	page, err := client.Get("http://127.0.0.1:" + port + "/")
+	if err != nil {
+		t.Fatalf("web index on reported addr: %v", err)
+	}
+	page.Body.Close()
+	if page.StatusCode != http.StatusOK {
+		t.Fatalf("web index status %d", page.StatusCode)
+	}
+
+	// Enabling twice is idempotent and keeps the same listener.
+	again, err := client.Post("http://"+st.Addr+"/v1/web", "application/json",
+		strings.NewReader(`{"enabled": true}`))
+	if err != nil {
+		t.Fatalf("re-enable web: %v", err)
+	}
+	var second struct {
+		OK   bool   `json:"ok"`
+		Addr string `json:"addr"`
+	}
+	err = json.NewDecoder(again.Body).Decode(&second)
+	again.Body.Close()
+	if err != nil {
+		t.Fatalf("decode re-enable: %v", err)
+	}
+	if !second.OK || second.Addr != on.Addr {
+		t.Fatalf("re-enable changed the listener: %q → %q", on.Addr, second.Addr)
+	}
+
+	off, err := client.Post("http://"+st.Addr+"/v1/web", "application/json",
+		strings.NewReader(`{"enabled": false}`))
+	if err != nil {
+		t.Fatalf("disable web: %v", err)
+	}
+	var down struct {
+		OK      bool `json:"ok"`
+		Enabled bool `json:"enabled"`
+	}
+	err = json.NewDecoder(off.Body).Decode(&down)
+	off.Body.Close()
+	if err != nil {
+		t.Fatalf("decode disable: %v", err)
+	}
+	if !down.OK || down.Enabled {
+		t.Fatalf("disable web: %+v", down)
+	}
+
+	// The listener must actually be gone.
+	waitFor(t, 3*time.Second, func() bool {
+		resp, err := client.Get("http://127.0.0.1:" + port + "/")
+		if err != nil {
+			return true
+		}
+		resp.Body.Close()
+		return false
+	})
 }

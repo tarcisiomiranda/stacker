@@ -47,6 +47,15 @@ type attachLogsMsg struct {
 }
 type attachStatusMsg string
 
+// attachWebMsg carries the outcome of a /v1/web toggle. The URL is built on
+// this side, from addr, because only the client knows which address its own
+// browser can reach.
+type attachWebMsg struct {
+	addr    string
+	enabled bool
+	err     error
+}
+
 type attachModel struct {
 	client     *controlClient
 	configPath string
@@ -164,10 +173,56 @@ func (m *attachModel) postAction(action string) tea.Cmd {
 	}
 }
 
+// toggleWebCmd flips the supervisor's web log viewer through the control plane.
+// A POST with no body means "toggle", so the client never has to track state
+// that the supervisor already owns.
+func (m *attachModel) toggleWebCmd() tea.Cmd {
+	return func() tea.Msg {
+		var resp struct {
+			OK      bool   `json:"ok"`
+			Error   string `json:"error"`
+			Enabled bool   `json:"enabled"`
+			Addr    string `json:"addr"`
+		}
+		if err := m.client.post("/v1/web", nil, &resp); err != nil {
+			if resp.Error != "" {
+				return attachWebMsg{err: fmt.Errorf("%s", resp.Error)}
+			}
+			return attachWebMsg{err: err}
+		}
+		return attachWebMsg{addr: resp.Addr, enabled: resp.Enabled}
+	}
+}
+
+// copyWebURLCmd puts the URL on the clipboard (OSC 52 works over SSH), keeping
+// the side effect out of Update so the toggle stays testable.
+func (m *attachModel) copyWebURLCmd(target string) tea.Cmd {
+	return func() tea.Msg {
+		if err := copyToClipboard(target); err != nil {
+			return attachStatusMsg("Web logs: " + target)
+		}
+		return attachStatusMsg("Web logs: " + target + " (copied)")
+	}
+}
+
 func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case attachWebMsg:
+		switch {
+		case msg.err != nil:
+			m.statusText = "Web logs failed: " + msg.err.Error()
+		case !msg.enabled:
+			m.statusText = "Web logs stopped"
+		default:
+			target := webPublicBaseURL(msg.addr) + "/"
+			if name := m.currentName(); name != "" {
+				target = webLogsURL(msg.addr, name)
+			}
+			m.statusText = "Web logs: " + target
+			return m, m.copyWebURLCmd(target)
+		}
 	case attachTickMsg:
 		return m, tea.Batch(m.pollSnap(), m.pollLogs(), m.tick())
 	case attachSnapMsg:
@@ -266,6 +321,8 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return attachStatusMsg(fmt.Sprintf("Marked %d running", resp.Marked))
 			}
+		case "w":
+			return m, m.toggleWebCmd()
 		case "W":
 			m.wrap = !m.wrap
 		case "pgup":
@@ -351,6 +408,7 @@ func (m *attachModel) footerView() string {
 		keycap("s") + " stop",
 		keycap("r") + " restart",
 		keycap("f") + " free port",
+		keycap("w") + " web",
 		keycap("q") + " detach",
 		keycap("?") + " help",
 	}
@@ -366,6 +424,7 @@ func (m *attachModel) helpView() string {
 		{"f", "free port"},
 		{"space", "mark selected"},
 		{"m", "mark all running"},
+		{"w", "toggle web logs (copies the URL)"},
 		{"W", "toggle word wrap"},
 		{"pgup/pgdn", "page logs"},
 		{"G / end", "follow bottom"},

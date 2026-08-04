@@ -63,6 +63,49 @@ func startWebServer(m *model, config string) (*webServer, error) {
 	return ws, nil
 }
 
+// startWeb starts the web viewer unless one is already running, returning its
+// listen address. Idempotent, so toggles arriving from different clients (TUI
+// key, control plane) cannot leak a second listener.
+func (m *model) startWeb() (string, error) {
+	m.webMu.Lock()
+	defer m.webMu.Unlock()
+	if m.web != nil {
+		return m.web.Addr(), nil
+	}
+	ws, err := startWebServer(m, m.configPath)
+	if err != nil {
+		return "", err
+	}
+	m.web = ws
+	return ws.Addr(), nil
+}
+
+// stopWeb shuts the web viewer down, reporting whether one was running. The
+// listener is closed synchronously so the port is free the moment this returns;
+// in-flight requests drain in the background.
+func (m *model) stopWeb() bool {
+	m.webMu.Lock()
+	ws := m.web
+	m.web = nil
+	m.webMu.Unlock()
+	if ws == nil {
+		return false
+	}
+	_ = ws.listener.Close()
+	go ws.Close()
+	return true
+}
+
+// webAddr returns the viewer's listen address, or "" when it is off.
+func (m *model) webAddr() string {
+	m.webMu.Lock()
+	defer m.webMu.Unlock()
+	if m.web == nil {
+		return ""
+	}
+	return m.web.Addr()
+}
+
 // listenWeb binds the preferred host:port, falling back to an ephemeral port
 // on the same host when the preferred port is already taken.
 func listenWeb(ui UIConfig) (net.Listener, error) {
@@ -91,22 +134,84 @@ func listenWeb(ui UIConfig) (net.Listener, error) {
 func (ws *webServer) Addr() string { return ws.listener.Addr().String() }
 
 // webPublicBaseURL returns an http://host:port suitable for pasting into a
-// browser. When listening on 0.0.0.0 / ::, prefer the machine hostname so a
-// remote client has a usable address instead of 0.0.0.0.
+// browser. A wildcard bind is rewritten to an address the client can actually
+// reach; an explicit ui.web_host is left untouched.
 func webPublicBaseURL(listenAddr string) string {
 	host, port, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		return "http://" + listenAddr
 	}
-	switch host {
-	case "0.0.0.0", "::", "[::]", "":
-		if h, herr := os.Hostname(); herr == nil && h != "" {
-			host = h
-		} else {
-			host = "127.0.0.1"
-		}
+	if isWildcardHost(host) {
+		host = publicHost()
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// isWildcardHost reports whether host is a bind-all address, which is never a
+// usable destination in a URL.
+func isWildcardHost(host string) bool {
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	}
+	return false
+}
+
+// publicHost picks a host reachable by whoever will open the browser.
+//
+// os.Hostname() is deliberately not used: machine names frequently fail to
+// resolve (macOS *.local without mDNS, corporate DHCP suffixes), which yields a
+// URL nobody can open. The order below reflects who holds the browser:
+//
+//	SSH session → the server address the client connected to
+//	local desktop → loopback
+//	headless daemon → the default-route address
+func publicHost() string {
+	if addr := sshServerAddress(os.Getenv("SSH_CONNECTION")); addr != "" {
+		return addr
+	}
+	if canOpenBrowser() {
+		return "127.0.0.1"
+	}
+	if ip := outboundIP(); ip != "" {
+		return ip
+	}
+	return "127.0.0.1"
+}
+
+// sshServerAddress extracts the server address from SSH_CONNECTION, whose
+// format is "client_ip client_port server_ip server_port". That address is the
+// one the client used to reach this machine, so it is routable by construction.
+// Returns "" when the variable is absent or malformed.
+func sshServerAddress(conn string) string {
+	fields := strings.Fields(conn)
+	if len(fields) < 3 {
+		return ""
+	}
+	if net.ParseIP(fields[2]) == nil {
+		return ""
+	}
+	return fields[2]
+}
+
+// outboundIP reports the local address of the default route. A UDP dial only
+// fills in the socket's local endpoint — no packet is sent — and the target is
+// a TEST-NET-3 address that is never routed. Returns "" when there is no
+// usable route or the result is loopback.
+func outboundIP() string {
+	conn, err := net.Dial("udp", "203.0.113.1:9")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return ""
+	}
+	return host
 }
 
 func (ws *webServer) Close() {

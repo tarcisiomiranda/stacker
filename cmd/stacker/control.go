@@ -247,6 +247,7 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 	mux.HandleFunc("/v1/mark-all", cs.handleMarkAll)
 	mux.HandleFunc("/v1/order", cs.handleOrder)
 	mux.HandleFunc("/v1/highlight-errors", cs.handleHighlightErrors)
+	mux.HandleFunc("/v1/web", cs.handleWeb)
 	mux.HandleFunc("/v1/down", cs.handleDown)
 
 	cs.server = &http.Server{Handler: mux}
@@ -484,6 +485,51 @@ func (cs *controlServer) handleHighlightErrors(w http.ResponseWriter, r *http.Re
 	}
 	cs.m.notify()
 	writeJSON(w, map[string]any{"ok": true, "enabled": body.Enabled})
+}
+
+// handleWeb reports or toggles the on-demand web log viewer. GET reports the
+// current state; POST with {"enabled": bool} sets it, and POST without a body
+// toggles.
+//
+// The response carries the raw listen address (0.0.0.0:52911) rather than a
+// URL: only the caller knows which address its own browser can reach. An
+// attached TUI runs inside the current SSH session and can resolve that, while
+// a daemonized supervisor inherited the environment of whichever session
+// started it.
+func (cs *controlServer) handleWeb(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		addr := cs.m.webAddr()
+		writeJSON(w, map[string]any{"ok": true, "enabled": addr != "", "addr": addr})
+		return
+	case http.MethodPost:
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Absent "enabled" means toggle, which is what a keypress wants.
+	enable := cs.m.webAddr() == ""
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.Enabled != nil {
+		enable = *body.Enabled
+	}
+
+	if !enable {
+		cs.m.stopWeb()
+		cs.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "enabled": false, "addr": ""})
+		return
+	}
+	addr, err := cs.m.startWeb()
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	cs.m.notify()
+	writeJSON(w, map[string]any{"ok": true, "enabled": true, "addr": addr})
 }
 
 // handleDown stops every process and signals the supervisor to exit.

@@ -1,4 +1,4 @@
-last_updated: 2026-07-28
+last_updated: 2026-08-03
 
 domain: processes
 description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, and terminal UI.
@@ -56,6 +56,10 @@ rest:
     - name: POST /v1/order
       path: cmd/stacker/control.go
     - name: POST /v1/highlight-errors
+      path: cmd/stacker/control.go
+    - name: GET /v1/web
+      path: cmd/stacker/control.go
+    - name: POST /v1/web
       path: cmd/stacker/control.go
     - name: POST /v1/down
       path: cmd/stacker/control.go

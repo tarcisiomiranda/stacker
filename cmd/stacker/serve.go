@@ -57,16 +57,15 @@ func runServe(configPath string, background, withWeb bool) int {
 	}()
 
 	if withWeb {
-		ws, err := startWebServer(m, m.configPath)
+		addr, err := m.startWeb()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "web server error:", err)
 		} else {
-			m.web = ws
-			target := webPublicBaseURL(ws.Addr()) + "/"
+			target := webPublicBaseURL(addr) + "/"
 			if len(m.processes) > 0 {
-				target = webLogsURL(ws.Addr(), m.processes[0].Name)
+				target = webLogsURL(addr, m.processes[0].Name)
 			}
-			fmt.Fprintf(os.Stderr, "web logs: %s (listen %s)\n", target, ws.Addr())
+			fmt.Fprintf(os.Stderr, "web logs: %s (listen %s)\n", target, addr)
 		}
 	}
 
@@ -85,9 +84,7 @@ func runServe(configPath string, background, withWeb bool) int {
 	case <-m.shutdown:
 	}
 
-	if m.web != nil {
-		m.web.Close()
-	}
+	m.stopWeb()
 	m.stopAll()
 	return 0
 }

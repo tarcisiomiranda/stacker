@@ -11,17 +11,58 @@ import (
 	"time"
 )
 
-func TestWebPublicBaseURLRewritesWildcard(t *testing.T) {
-	got := webPublicBaseURL("0.0.0.0:52911")
-	if !strings.HasPrefix(got, "http://") || !strings.HasSuffix(got, ":52911") {
-		t.Fatalf("unexpected public URL %q", got)
+// A wildcard bind must never advertise os.Hostname(): machine names routinely
+// do not resolve (macOS *.local without mDNS, corporate DHCP suffixes), which
+// produced a URL nobody could open.
+func TestWebPublicBaseURLUsesLoopbackOnLocalDesktop(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("DISPLAY", ":0") // keep canOpenBrowser() true on headless Linux CI
+	if got := webPublicBaseURL("0.0.0.0:52911"); got != "http://127.0.0.1:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want http://127.0.0.1:52911", got)
 	}
-	if strings.Contains(got, "0.0.0.0") {
-		t.Fatalf("public URL should not keep 0.0.0.0: %q", got)
+}
+
+// Over SSH the browser runs on the client, so loopback is useless. SSH_CONNECTION
+// carries "client_ip client_port server_ip server_port": the server address is
+// the one the client actually reached, so it is routable by construction.
+func TestWebPublicBaseURLUsesSSHServerAddress(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "10.1.2.3 54321 192.168.1.20 22")
+	if got := webPublicBaseURL("0.0.0.0:52911"); got != "http://192.168.1.20:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want http://192.168.1.20:52911", got)
 	}
-	local := webPublicBaseURL("127.0.0.1:52911")
-	if local != "http://127.0.0.1:52911" {
-		t.Fatalf("local URL = %q", local)
+}
+
+func TestWebPublicBaseURLBracketsIPv6SSHAddress(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "fe80::1 54321 2001:db8::20 22")
+	if got := webPublicBaseURL("[::]:52911"); got != "http://[2001:db8::20]:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want http://[2001:db8::20]:52911", got)
+	}
+}
+
+// An explicit ui.web_host is a deliberate choice and must survive untouched.
+func TestWebPublicBaseURLKeepsExplicitBindHost(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "10.1.2.3 54321 192.168.1.20 22")
+	if got := webPublicBaseURL("127.0.0.1:52911"); got != "http://127.0.0.1:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want the explicit bind host", got)
+	}
+	if got := webPublicBaseURL("10.0.0.9:52911"); got != "http://10.0.0.9:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want the explicit bind host", got)
+	}
+}
+
+func TestSSHServerAddress(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"10.1.2.3 54321", ""},
+		{"10.1.2.3 54321 192.168.1.20 22", "192.168.1.20"},
+		{"  10.1.2.3   54321   192.168.1.20   22  ", "192.168.1.20"},
+		{"fe80::1 54321 2001:db8::20 22", "2001:db8::20"},
+		{"10.1.2.3 54321 not-an-ip 22", ""},
+	}
+	for _, tc := range cases {
+		if got := sshServerAddress(tc.in); got != tc.want {
+			t.Fatalf("sshServerAddress(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

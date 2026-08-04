@@ -634,7 +634,10 @@ type model struct {
 	statusText string
 	refreshCh  chan struct{}
 	configPath string
-	web        *webServer
+	// webMu guards web: the TUI `w` key, the control plane (/v1/web) and
+	// shutdown all toggle the viewer.
+	webMu sync.Mutex
+	web   *webServer
 
 	// procsMu guards the processes slice reference: the TUI goroutine swaps
 	// it on reorder while web/control handlers iterate it.
@@ -919,22 +922,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}(p)
 			}
 		case "w":
-			if m.web != nil {
-				ws := m.web
-				m.web = nil
+			if m.stopWeb() {
 				m.statusText = "Web logs stopped"
-				go ws.Close()
 				break
 			}
-			ws, err := startWebServer(m, m.configPath)
+			addr, err := m.startWeb()
 			if err != nil {
 				m.statusText = "Web logs failed: " + err.Error()
 				break
 			}
-			m.web = ws
-			target := webPublicBaseURL(ws.Addr()) + "/"
+			target := webPublicBaseURL(addr) + "/"
 			if p := m.current(); p != nil {
-				target = webLogsURL(ws.Addr(), p.Name)
+				target = webLogsURL(addr, p.Name)
 			}
 			return m, m.openWebCmd(target)
 		case "shift+up", "K":
@@ -1818,9 +1817,7 @@ func runSession(configPath string) int {
 		tea.WithContext(ctx),
 	)
 	_, runErr := program.Run()
-	if m.web != nil {
-		m.web.Close()
-	}
+	m.stopWeb()
 	m.stopAll()
 	if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, tea.ErrProgramKilled)) {
 		fmt.Fprintln(os.Stderr, "stacker error:", runErr)

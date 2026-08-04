@@ -16,7 +16,7 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **CLI control plane** — `list`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
 - **Serve + attach** — `stacker serve -d` runs headless in the background; `stacker attach` (or plain `stacker`) opens the TUI; `q` detaches without killing services; `stacker down` shuts everything down.
 - **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
-- **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`). On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
+- **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`), in a session TUI or attached to a headless `serve`. The announced URL targets whoever holds the browser: the SSH address you connected through, or loopback on a local desktop. On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
 - **One-shot tasks** — named commands (migrations, seeds, deploys) that run once and exit, either scoped to a process or standalone.
 - **Error highlighting** — opt-in orange badge when output looks like a traceback/panic/error, even while the service keeps running.
 - **Word wrap, per-process color dots, log marks, and a help overlay** — all toggleable at runtime; color and order changes are written back to the YAML.
@@ -183,7 +183,16 @@ Stacker prefers the native clipboard (`pbcopy` on macOS), falling back to OSC 52
 
 ## Web log viewer
 
-Press `w` in the TUI to toggle a browser UI on `0.0.0.0:52911` by default (off by default, no restart needed; override with `ui.web_host` / `ui.web_port`). Turning it on copies the URL; on a desktop it also opens your browser, while on SSH/headless hosts it only shows/copies the URL. Press `w` again to shut it down.
+Press `w` in the TUI to toggle a browser UI on `0.0.0.0:52911` by default (off by default, no restart needed; override with `ui.web_host` / `ui.web_port`). It works the same in an attached TUI, so a headless `stacker serve` can expose the viewer without being restarted with `--web`. Turning it on copies the URL; on a desktop it also opens your browser, while on SSH/headless hosts it only shows/copies the URL. Press `w` again to shut it down.
+
+Because a wildcard bind is not a destination, Stacker has to pick the host for that URL. It never advertises the machine hostname — `MacBook-Pro-de-x.local` and corporate DHCP names frequently do not resolve, producing a link nobody can open. Instead:
+
+| Where Stacker runs | Announced host |
+|---|---|
+| Over SSH | The server address from `SSH_CONNECTION` — the one your client reached, so it is routable by construction |
+| Local desktop | `127.0.0.1` |
+| Headless daemon, no SSH | The default-route address |
+| `ui.web_host` set explicitly | Exactly what you configured |
 
 The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶`), and per-process:
 
@@ -192,7 +201,7 @@ The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶
 - a **More ▾** menu: marks, the **error badge** toggle, a **color selector**, and buttons to run that process's tasks;
 - freezing with `Space` to select text without the log moving.
 
-It's read-and-control only over loopback — no auth, meant for local dev.
+It has **no authentication**, and the default bind is `0.0.0.0` — anyone who can reach the port can read logs and start/stop processes. That is the point on a trusted dev network, but set `ui.web_host: "127.0.0.1"` when the machine is exposed.
 
 ## CLI (for scripts and AI agents)
 
@@ -286,4 +295,4 @@ You can also trigger the workflow manually from the Actions tab with a tag. The 
 - Selection operates on whole lines, not individual columns.
 - Clipboard uses `pbcopy` / `wl-copy` / `xclip` when available, otherwise OSC 52 (the terminal must allow it).
 - No process health checks or inter-process dependencies yet.
-- The web viewer is unauthenticated loopback-only, intended for local development.
+- The web viewer is unauthenticated and binds `0.0.0.0` by default; use `ui.web_host: "127.0.0.1"` to restrict it to loopback.
