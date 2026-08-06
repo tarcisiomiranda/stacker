@@ -1,0 +1,28 @@
+# Hand-written release notes for v0.11.0.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.11.0
+
+highlights: |
+  Several projects can be supervised at once without Stacker guessing which
+  instance you meant. An explicit `--config` always wins; a bare `stacker`
+  offers a picker; free-port reclaim across instances leaves a log trail on
+  both sides.
+
+features:
+  - "**Instance resolution** — `parseArgs` reports whether `--config` was explicit; a config that exists on disk is never swapped for another running instance"
+  - "**Instance picker** — bare `stacker` / `stacker a` with other supervisors live opens a TUI (`↑↓` · `enter` · `n` start local · `d` stop · `r` refresh · `q`); without a TTY prints the list and exits 1"
+  - "**`stacker instances` / `ins`** — list every supervisor on the machine (`--json` includes ports and `port_collisions`)"
+  - "**Safe CLI fallback** — read-only `list` / `status` / `tasks` adopt the only live instance only when the target config is missing on disk (with a stderr warning); `start` / `stop` / `restart` / `run` / `down` never adopt"
+  - "**Port reclaim audit** — taking a port from another instance logs on both sides via `POST /v1/processes/{name}/note`; every free-port path uses the same trail (Start, TUI `f`, control plane, web, CLI)"
+  - "**Web project identity** — log page title and sidebar show the config label/path; banner when other instances are running"
+  - "**`ProcessInfo.pid`** — exposed while a process is alive for cross-instance ownership"
+
+fixes:
+  - "**Wrong project attach** — `stacker --config stacker.yml` no longer attaches to the only unrelated supervisor with a silent `note:` on stderr"
+  - "**Wrong project `list` / `down`** — a stopped local `stacker.yml` no longer redirects read or mutate commands to another project's stack"
+
+changes:
+  - "`serve -d` prints the multi-instance / shared-port notice on the parent process (not only in the daemon log)"
+  - "Agents must always pass `--config`; skill + AGENTS.md document the resolution table and `stacker instances --json`"
+  - "Shared ports remain allowed by design; they are reported and logged, not blocked"
