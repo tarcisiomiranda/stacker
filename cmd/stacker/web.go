@@ -133,6 +133,18 @@ func listenWeb(ui UIConfig) (net.Listener, error) {
 
 func (ws *webServer) Addr() string { return ws.listener.Addr().String() }
 
+// otherInstanceCount is how many other supervisors are live, so the page can say
+// that this is not the only Stacker running. Best effort: a discovery failure
+// just means the hint is omitted.
+func (ws *webServer) otherInstanceCount() int {
+	all, err := listRunningInstances()
+	if err != nil {
+		return 0
+	}
+	_, others := splitInstances(all, ws.config)
+	return len(others)
+}
+
 // webPublicBaseURL returns an http://host:port suitable for pasting into a
 // browser. A wildcard bind is rewritten to an address the client can actually
 // reach; an explicit ui.web_host is left untouched.
@@ -230,7 +242,13 @@ func (ws *webServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = indexTemplate.Execute(w, map[string]any{"Config": ws.config, "Processes": ws.processRows(""), "Tasks": ws.taskRows("")})
+	_ = indexTemplate.Execute(w, map[string]any{
+		"Config":         ws.config,
+		"ConfigLabel":    configLabel(ws.config, 1),
+		"OtherInstances": ws.otherInstanceCount(),
+		"Processes":      ws.processRows(""),
+		"Tasks":          ws.taskRows(""),
+	})
 }
 
 // taskEntry is one one-shot task rendered as a button on the logs page.
@@ -324,6 +342,11 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = logsTemplate.Execute(w, map[string]any{
+		// Config/ConfigLabel are what tell two open tabs apart when several
+		// projects are being served at once.
+		"Config":          ws.config,
+		"ConfigLabel":     configLabel(ws.config, 1),
+		"OtherInstances":  ws.otherInstanceCount(),
 		"Name":            p.Name,
 		"NameEscaped":     url.PathEscape(p.Name),
 		"Status":          oneShotStatusLabel(p, p.Status()),
@@ -508,7 +531,7 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		go func() {
-			killed, err := freePort(p.Config.Port)
+			killed, err := freePortAudited(p.Config.Port, currentInstanceConfig(), p.appendLog)
 			switch {
 			case err != nil:
 				p.appendLog("[stacker] free-port failed: " + err.Error())

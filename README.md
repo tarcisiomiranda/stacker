@@ -15,6 +15,7 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **Split log capture** — separate stdout/stderr, scrollable, with a configurable per-process memory cap.
 - **CLI control plane** — `list`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
 - **Serve + attach** — `stacker serve -d` runs headless in the background; `stacker attach` (or plain `stacker`) opens the TUI; `q` detaches without killing services; `stacker down` shuts everything down.
+- **Instance picker** — with several projects supervised at once, a bare `stacker` lists what is running (label, config path, ports, port collisions) and lets you pick, start the local config, or stop one. An explicit `--config` is always honoured and never swapped for another instance.
 - **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
 - **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`), in a session TUI or attached to a headless `serve`. The announced URL targets whoever holds the browser: the SSH address you connected through, or loopback on a local desktop. On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
 - **One-shot tasks** — named commands (migrations, seeds, deploys) that run once and exit, either scoped to a process or standalone.
@@ -222,12 +223,57 @@ stacker restart backend
 stacker free-port 8000          # works even without a running instance
 stacker tasks                   # list one-shot tasks per process
 stacker run backend migrate     # run a task; output goes to the process log
+stacker instances               # every running Stacker on this machine
 stacker version                 # -v / --version also work
 ```
 
 Only one Stacker instance is allowed per absolute config path; the control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
 
 **Session vs serve:** `stacker` (no subcommand) is session mode — the TUI owns the process; `q` stops everything. `stacker serve` is headless; processes keep running until `stacker down` or SIGTERM. `stacker attach` (or plain `stacker` while serve is up) opens a TUI that **detaches** on `q` without killing services.
+
+## Working on several projects at once
+
+Two projects can be supervised simultaneously — instances are keyed by the absolute config path, so only an identical config conflicts. What used to be confusing was *which* instance a command reached; the rules are now explicit.
+
+**An explicit `--config` always wins.** A config that exists on disk is never swapped for another running instance:
+
+| You run | Target config running? | Result |
+|---|---|---|
+| `stacker --config X` | yes | attach to X |
+| `stacker --config X` | no | **start X** — never another instance |
+| `stacker` | `./stacker.yml` running | attach to it |
+| `stacker` | not running, others alive | **picker** |
+| `stacker` | not running, nothing alive | start `./stacker.yml` |
+| `stacker a` | — | picker (attach never starts anything) |
+
+The picker (`↑↓` move · `enter` open · `n` start the config here · `d` stop · `r` refresh · `q` quit) shows each instance with its label, config path, mode, how many processes are up, its ports, and a warning when a port is shared. The last row (and `n`) starts `./stacker.yml` when it exists; without a local config those controls are omitted. Without a TTY it prints the same list and exits 1, so scripts and agents never hang on a prompt.
+
+`stacker instances` (alias `ins`, plus `--json`) is the non-interactive version.
+
+For subcommands, whether another instance can be adopted depends on what the command does:
+
+| Class | Commands | Adopts the single live instance? |
+|---|---|---|
+| read-only | `list`, `status`, `tasks` | only when the target config does not exist on disk, and it warns |
+| state-changing | `start`, `stop`, `restart`, `run`, `down` | **never** — errors and lists what is running |
+
+That split exists because a wrong `list` merely misinforms, while a wrong `down` takes another project's stack with it.
+
+### Shared ports
+
+`free-port` terminates whatever holds the port — including a process belonging to another instance. It still does: the port is free when the call returns. What changed is that the loss is no longer silent. The claiming side logs
+
+```
+[stacker] port 8080 reclaimed from frontend @ bunker-orchestrator (pid 4510)
+```
+
+and the victim's own log receives
+
+```
+[stacker] frontend terminated: port 8080 reclaimed by /srv/_cyber_/stacker.yml
+```
+
+Starting a supervisor while another one declares the same port also prints a `notice:` naming the shared port, and the picker flags it up front.
 
 **Live config reload:** while any instance runs, edits to `stacker.yml` (add/remove/reorder processes, field changes) are picked up within ~500ms. New processes with `autostart: true` start automatically. Removing a **running** process keeps it listed (⚠) until you stop it, then it disappears. Invalid YAML is rejected and the previous config stays active.
 
@@ -295,4 +341,5 @@ You can also trigger the workflow manually from the Actions tab with a tag. The 
 - Selection operates on whole lines, not individual columns.
 - Clipboard uses `pbcopy` / `wl-copy` / `xclip` when available, otherwise OSC 52 (the terminal must allow it).
 - No process health checks or inter-process dependencies yet.
+- Shared ports across instances are reported, not prevented: the port is still taken (by design), with a log line on both sides.
 - The web viewer is unauthenticated and binds `0.0.0.0` by default; use `ui.web_host: "127.0.0.1"` to restrict it to loopback.

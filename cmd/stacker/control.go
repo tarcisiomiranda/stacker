@@ -32,8 +32,12 @@ type InstanceState struct {
 
 // ProcessInfo is the JSON shape returned by the control API and CLI.
 type ProcessInfo struct {
-	Name     string   `json:"name"`
-	Status   string   `json:"status"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// PID is the process group leader while the process is alive, 0 otherwise.
+	// It lets a caller prove that a listener found on a port belongs to this
+	// exact process instead of inferring ownership from declared ports.
+	PID      int      `json:"pid,omitempty"`
 	Port     int      `json:"port,omitempty"`
 	Color    string   `json:"color,omitempty"`
 	Errors   int      `json:"errors,omitempty"`
@@ -175,32 +179,6 @@ func listRunningInstances() ([]InstanceState, error) {
 	return out, nil
 }
 
-// resolveRunningInstance finds the instance for configPath. If that config has
-// no supervisor but exactly one Stacker is running on this machine, it returns
-// that one so `stacker a` / `stacker list` work after `serve -d` with a custom
-// --config. Multiple running instances still require an explicit --config.
-func resolveRunningInstance(configPath string) (st *InstanceState, usedConfig string, fallback bool, err error) {
-	st, err = findRunningInstance(configPath)
-	if err != nil {
-		return nil, configPath, false, err
-	}
-	if st != nil {
-		return st, configPath, false, nil
-	}
-	all, err := listRunningInstances()
-	if err != nil {
-		return nil, configPath, false, err
-	}
-	if len(all) == 0 {
-		return nil, configPath, false, nil
-	}
-	if len(all) == 1 {
-		only := all[0]
-		return &only, only.Config, true, nil
-	}
-	return nil, configPath, false, errMultipleInstances(configPath, all)
-}
-
 func controlPing(addr string, timeout time.Duration) error {
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get("http://" + addr + "/v1/ping")
@@ -237,6 +215,10 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 		statePath: path,
 		listener:  ln,
 	}
+	// The model needs its own absolute config path to tell its processes apart
+	// from another instance's. Setting it here means no caller can forget.
+	m.configPath = absConfig
+	setInstanceConfig(absConfig)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/ping", cs.handlePing)
@@ -388,13 +370,35 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 		p.Mark()
 		cs.m.notify()
 		writeJSON(w, map[string]any{"ok": true, "process": processInfo(p)})
+	case "note":
+		// Lets another instance explain itself in this process's log — used when
+		// it reclaims a port and terminates this listener, so the death is not
+		// a bare exit with no cause.
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		text := strings.TrimSpace(body.Text)
+		if text == "" {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "text cannot be empty"})
+			return
+		}
+		if !strings.HasPrefix(text, "[stacker]") {
+			text = "[stacker] " + text
+		}
+		p.appendLog(sanitizeLogLine(text))
+		cs.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "process": processInfo(p)})
 	case "free-port":
 		if p.Config.Port <= 0 {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("process %q has no port configured", p.Name)})
 			return
 		}
 		go func() {
-			killed, err := freePort(p.Config.Port)
+			killed, err := freePortAudited(p.Config.Port, currentInstanceConfig(), p.appendLog)
 			switch {
 			case err != nil:
 				p.appendLog("[stacker] free-port failed: " + err.Error())
@@ -581,10 +585,23 @@ func (cs *controlServer) handleFreePort(w http.ResponseWriter, r *http.Request) 
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
 		return
 	}
-	killed, err := freePort(body.Port)
+	// Prefer logging the claim on the process that declared this port, so the
+	// reclaim line appears in a real process log rather than only on the victim.
+	var logf func(string)
+	for _, p := range cs.m.procs() {
+		if p.Config.Port == body.Port {
+			proc := p
+			logf = proc.appendLog
+			break
+		}
+	}
+	killed, err := freePortAudited(body.Port, currentInstanceConfig(), logf)
 	if err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+	if logf != nil {
+		cs.m.notify()
 	}
 	writeJSON(w, map[string]any{"ok": true, "port": body.Port, "killed": killed})
 }
@@ -616,6 +633,7 @@ func processInfo(p *Process) ProcessInfo {
 	return ProcessInfo{
 		Name:     p.Name,
 		Status:   label,
+		PID:      p.PID(),
 		Port:     p.Config.Port,
 		Color:    p.Color(),
 		Errors:   p.Errors(),
@@ -653,19 +671,44 @@ type controlClient struct {
 	client *http.Client
 }
 
+// newControlClient connects to the supervisor for configPath and never adopts an
+// instance that belongs to a different config.
 func newControlClient(configPath string) (*controlClient, *InstanceState, error) {
-	st, used, fallback, err := resolveRunningInstance(configPath)
+	return newControlClientFor(configPath, false)
+}
+
+// newControlClientFor connects to the supervisor for configPath.
+//
+// allowFallback lets a read-only command adopt the single live instance, but
+// only when configPath does not exist on disk. Standing in a directory whose
+// stacker.yml is merely stopped must never redirect the command somewhere else:
+// that is what made `stacker list` report another project's processes.
+//
+// State-changing commands always pass false. Acting on an instance the user did
+// not name cannot be undone by reading the output afterwards — a stray `down`
+// takes someone else's stack with it.
+func newControlClientFor(configPath string, allowFallback bool) (*controlClient, *InstanceState, error) {
+	st, err := findRunningInstance(configPath)
 	if err != nil {
 		return nil, nil, err
+	}
+	if st == nil && allowFallback && !configExists(configPath) {
+		all, listErr := listRunningInstances()
+		if listErr == nil && len(all) > 1 {
+			return nil, nil, errMultipleInstances(configPath, all)
+		}
+		if listErr == nil && len(all) == 1 {
+			only := all[0]
+			st = &only
+			// Loud on stderr so --json stdout stays machine-readable.
+			fmt.Fprintf(os.Stderr, "warning: no config at %s\n", configPath)
+			fmt.Fprintf(os.Stderr, "         using the only running instance: %s\n", only.Config)
+			fmt.Fprintf(os.Stderr, "         pass --config to choose explicitly\n")
+		}
 	}
 	if st == nil {
 		return nil, nil, errNoRunningInstance(configPath)
 	}
-	if fallback {
-		// Human-readable note on stderr so --json stdout stays clean.
-		fmt.Fprintf(os.Stderr, "note: no instance for %s; using only running config %s\n", configPath, st.Config)
-	}
-	_ = used
 	return &controlClient{
 		addr: st.Addr,
 		client: &http.Client{
@@ -702,7 +745,13 @@ func errNoRunningInstance(configPath string) error {
 			fmt.Fprintf(&b, "    stacker --config %s a\n", shellQuote(st.Config))
 			fmt.Fprintf(&b, "    stacker --config %s list\n", shellQuote(st.Config))
 		}
-		b.WriteString("\nOr, if only one is running, plain `stacker a` / `stacker list` should pick it up.\n")
+		b.WriteString("\nA config present on disk is never replaced by another instance,\n")
+		b.WriteString("so pass --config for the one you mean. To browse them:\n")
+		b.WriteString("  stacker instances        # list every running supervisor\n")
+		b.WriteString("  stacker                  # choose one interactively\n")
+		if configExists(cfg) {
+			fmt.Fprintf(&b, "  stacker %s        # start this config\n", flag)
+		}
 		return errors.New(b.String())
 	}
 

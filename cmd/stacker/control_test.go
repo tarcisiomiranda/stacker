@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -345,48 +344,6 @@ processes:
 	}
 }
 
-func TestResolveRunningInstanceFallsBackToSingle(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := writeConfig(t, dir, `
-version: 1
-processes:
-  demo:
-    command: true
-`)
-	cfg, err := loadConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	m := newModel(cfg)
-	m.mode = "serve"
-	cs, err := startControlServer(m, cfgPath)
-	if err != nil {
-		t.Fatalf("startControlServer: %v", err)
-	}
-	defer cs.Close()
-
-	// Request a config that is not running; only one live instance exists.
-	other := filepath.Join(dir, "other.yml")
-	st, used, fallback, err := resolveRunningInstance(other)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if st == nil || !fallback {
-		t.Fatalf("expected fallback to single instance, st=%v fallback=%v used=%q", st, fallback, used)
-	}
-	if st.Config == "" {
-		t.Fatal("empty Config on resolved state")
-	}
-	// Direct path still resolves without fallback.
-	st2, _, fallback2, err := resolveRunningInstance(cfgPath)
-	if err != nil || st2 == nil || fallback2 {
-		t.Fatalf("direct resolve: st=%v fallback=%v err=%v", st2, fallback2, err)
-	}
-}
-
-// A headless supervisor has no TUI, so the web viewer can only be toggled
-// through the control plane. Without this endpoint `w` in attach has nothing to
-// call and the viewer is unreachable for the whole life of the daemon.
 func TestControlPlaneWebToggle(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeConfig(t, dir, `

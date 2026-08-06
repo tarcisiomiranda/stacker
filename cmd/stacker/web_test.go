@@ -66,6 +66,62 @@ func TestSSHServerAddress(t *testing.T) {
 	}
 }
 
+// Two log tabs from different projects used to be indistinguishable: both were
+// titled "backend — Stacker logs" with nothing naming the config being served.
+func TestWebLogsPageIdentifiesTheProject(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, `
+version: 1
+processes:
+  backend:
+    command: true
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	m := newModel(cfg)
+	ws, err := startWebServer(m, path)
+	if err != nil {
+		t.Fatalf("startWebServer: %v", err)
+	}
+	defer ws.Close()
+
+	resp, err := http.Get("http://" + ws.Addr() + "/logs/backend")
+	if err != nil {
+		t.Fatalf("get logs page: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	page := string(body)
+
+	label := configLabel(path, 1)
+	if !strings.Contains(page, label) {
+		t.Fatalf("logs page does not name the project %q:\n%s", label, page)
+	}
+	if !strings.Contains(page, path) {
+		t.Fatalf("logs page does not show the config path %q", path)
+	}
+
+	// The tab title is what disambiguates two open tabs, so the label has to be
+	// in the <title> and not only in the body.
+	start := strings.Index(page, "<title>")
+	end := strings.Index(page, "</title>")
+	if start < 0 || end < start {
+		t.Fatalf("no <title> in the logs page")
+	}
+	title := page[start:end]
+	if !strings.Contains(title, label) {
+		t.Fatalf("<title> %q does not include the project label %q", title, label)
+	}
+	if !strings.Contains(title, "backend") {
+		t.Fatalf("<title> %q lost the process name", title)
+	}
+}
+
 func TestListenWebDefaultPort(t *testing.T) {
 	ln, err := listenWeb(UIConfig{})
 	if err != nil {

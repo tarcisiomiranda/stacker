@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Name}} — Stacker logs</title>
+<title>{{.Name}} · {{.ConfigLabel}} — Stacker</title>
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <style>
 /* Minimal fallback so the page stays usable if the Tailwind CDN is offline. */
@@ -14,7 +14,12 @@ pre { overflow: auto; }
 <body class="bg-neutral-950 text-neutral-200 font-mono h-screen flex overflow-hidden text-sm">
 
 <aside class="w-56 shrink-0 flex flex-col border-r border-neutral-800 bg-neutral-900">
-  <a href="/" class="px-4 py-3 font-bold border-b border-neutral-800 hover:text-white">Stacker</a>
+  <a href="/" class="px-4 py-2 border-b border-neutral-800 hover:text-white block" title="{{.Config}}">
+    <span class="font-bold block">Stacker</span>
+    <span class="text-neutral-400 text-xs block truncate">{{.ConfigLabel}}</span>
+    {{if .OtherInstances}}<span class="text-amber-500 text-xs block">{{.OtherInstances}} other instance(s)</span>{{end}}
+  </a>
+  <p class="px-4 py-1 text-neutral-600 text-xs break-all border-b border-neutral-800">{{.Config}}</p>
   <nav id="plist" class="flex-1 overflow-y-auto py-2">
     {{range .Processes}}
     <div data-prow="{{.Name}}" draggable="true" title="drag to reorder (saved to YAML)"

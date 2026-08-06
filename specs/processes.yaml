@@ -1,7 +1,7 @@
-last_updated: 2026-08-03
+last_updated: 2026-08-06
 
 domain: processes
-description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, and terminal UI.
+description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, instance disambiguation, and terminal UI.
 
 models:
   - name: Config
@@ -20,6 +20,12 @@ models:
     path: cmd/stacker/control.go
   - name: ProcessInfo
     path: cmd/stacker/control.go
+  - name: instanceSummary
+    path: cmd/stacker/instances.go
+  - name: launchMode
+    path: cmd/stacker/launch.go
+  - name: portClaim
+    path: cmd/stacker/portclaim.go
 
 graphql:
   queries: []
@@ -42,6 +48,8 @@ rest:
     - name: POST /v1/processes/{name}/restart
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/mark
+      path: cmd/stacker/control.go
+    - name: POST /v1/processes/{name}/note
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/color
       path: cmd/stacker/control.go
@@ -104,6 +112,8 @@ frontend:
       path: cmd/stacker/main.go
     - name: Attach TUI
       path: cmd/stacker/attach.go
+    - name: Instance picker TUI
+      path: cmd/stacker/picker.go
     - name: Web log viewer (index + logs page)
       path: cmd/stacker/web.go
   types: []

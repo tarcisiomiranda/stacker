@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 )
 
-func runCLI(configPath string, args []string) int {
+func runCLI(configPath string, explicit bool, args []string) int {
 	jsonOut := false
 	var filtered []string
 	for _, a := range args {
@@ -61,13 +61,17 @@ func runCLI(configPath string, args []string) int {
 		}
 		return runServe(configPath, background, withWeb)
 	case "attach", "a":
-		return runAttach(configPath)
+		// attach never starts a supervisor: without an explicit --config it
+		// offers the live instances instead of adopting one at random.
+		return runTUI(configPath, explicit, false)
 	case "down":
 		return runDown(configPath, jsonOut)
 	case "ping":
 		return cliPing(configPath, jsonOut)
 	case "list", "ls":
 		return cliList(configPath, jsonOut)
+	case "instances", "ins":
+		return cliInstances(configPath, jsonOut)
 	case "status":
 		name := ""
 		if len(rest) > 0 {
@@ -121,7 +125,8 @@ func printCLIHelp() {
 	fmt.Print(`Stacker CLI — control a running Stacker instance
 
 Usage:
-  stacker [--config path]                  Start the TUI (session mode)
+  stacker                                  Attach to this config, or choose among running instances
+  stacker --config path                    Start that config (or attach if it already runs)
   stacker [--config path] <command> [args] Talk to a running instance
 
 Commands:
@@ -130,6 +135,7 @@ Commands:
   down                 Stop all processes and shut down the supervisor
   ping                 Check if Stacker is running for this config
   list                 List configured processes and their status
+  instances, ins       List every running Stacker on this machine
   status [name]        Status of all processes, or one by name
   start <name>         Start a process (frees configured port first)
   stop <name>          Stop a process
@@ -146,6 +152,10 @@ Flags:
 The --config path identifies the instance. serve, attach, list, start, down, …
 must all use the same path (default is ./stacker.yml relative to where you run the command).
 
+An explicit --config is always honoured: a config that exists is never swapped
+for another running instance. Without --config, a bare "stacker" offers the
+running instances to choose from instead of guessing.
+
 Examples:
   stacker --config ./stacker.yml              # session TUI
   stacker --config ./stacker.yml serve -d     # headless in background
@@ -153,13 +163,14 @@ Examples:
   stacker --config ./stacker.yml list --json
   stacker --config ./stacker.yml restart backend
   stacker --config ./stacker.yml down
+  stacker instances                           # what is running right now
   stacker free-port 8000                      # no instance required
   stacker --config ./stacker.yml run backend migrate
 `)
 }
 
 func cliTasks(configPath, name string, jsonOut bool) int {
-	client, _, err := newControlClient(configPath)
+	client, _, err := newControlClientFor(configPath, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -273,7 +284,7 @@ func cliPing(configPath string, jsonOut bool) int {
 }
 
 func cliList(configPath string, jsonOut bool) int {
-	client, st, err := newControlClient(configPath)
+	client, st, err := newControlClientFor(configPath, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -314,7 +325,7 @@ func cliStatus(configPath, name string, jsonOut bool) int {
 	if name == "" {
 		return cliList(configPath, jsonOut)
 	}
-	client, _, err := newControlClient(configPath)
+	client, _, err := newControlClientFor(configPath, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -399,7 +410,19 @@ func cliFreePort(configPath, portStr string, jsonOut bool) int {
 		}
 	}
 
-	killed, err := freePort(port)
+	// No local supervisor: still leave a note on any foreign Stacker process
+	// that declared the port before killing the listener.
+	self := ""
+	if abs, _, err := instanceID(configPath); err == nil {
+		self = abs
+	} else {
+		self = configPath
+	}
+	killed, err := freePortAudited(port, self, func(line string) {
+		if !jsonOut {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1

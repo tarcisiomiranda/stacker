@@ -25,6 +25,9 @@ func runServe(configPath string, background, withWeb bool) int {
 
 	m := newModel(cfg)
 	m.mode = "serve"
+	if notice := otherInstancesNotice(configPath, cfg); notice != "" {
+		fmt.Fprintln(os.Stderr, "notice:", notice)
+	}
 	control, err := startControlServer(m, configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "control plane error:", err)
@@ -106,8 +109,15 @@ func printServeStarted(configPath string, pid int, logPath string) {
 	fmt.Printf("stacker serve started in background (pid %d)\n", pid)
 	fmt.Printf("config: %s\n", configPath)
 	fmt.Printf("log: %s\n", logPath)
+	// Surface the multi-instance notice on the parent stderr too: with -d the
+	// daemon child's stderr goes only to the log file, so the user would miss it.
+	if cfg, err := loadConfig(configPath); err == nil {
+		if notice := otherInstancesNotice(configPath, cfg); notice != "" {
+			fmt.Fprintln(os.Stderr, "notice:", notice)
+		}
+	}
 	fmt.Printf("attach: stacker %s a\n", cfgFlag)
-	fmt.Printf("        stacker a   # ok when this is the only running instance\n")
+	fmt.Printf("        stacker            # picker when other instances are up\n")
 	fmt.Printf("stop:   stacker %s down\n", cfgFlag)
 }
 
@@ -115,7 +125,7 @@ func printServeAlreadyRunning(configPath string, st *InstanceState) {
 	cfgFlag := "--config " + shellQuote(configPath)
 	fmt.Printf("stacker already running for %s (pid %d, mode %s)\n", st.Config, st.PID, orDefault(st.Mode, "session"))
 	fmt.Printf("attach: stacker %s a\n", cfgFlag)
-	fmt.Printf("        stacker a   # ok when this is the only running instance\n")
+	fmt.Printf("        stacker            # picker when other instances are up\n")
 	fmt.Printf("list:   stacker %s list\n", cfgFlag)
 	fmt.Printf("stop:   stacker %s down\n", cfgFlag)
 }

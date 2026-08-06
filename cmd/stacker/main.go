@@ -190,6 +190,23 @@ func (p *Process) SetColor(c string) {
 	p.Config.Color = c
 }
 
+// PID is the pid of the process group leader while the process is alive, and 0
+// otherwise. exec.Cmd keeps Process populated after a wait, so the status check
+// is what distinguishes "running" from "ran once".
+func (p *Process) PID() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch p.status {
+	case StatusRunning, StatusStarting, StatusStopping:
+	default:
+		return 0
+	}
+	if p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
 // errLineRe matches output lines that look like errors: Python tracebacks and
 // exceptions, Go panics, JS/TS errors, npm/Rust/log-level markers. Matched per
 // line at capture time, only when ui.highlight_errors is on.
@@ -274,7 +291,13 @@ func (p *Process) Start(notify func()) error {
 	p.mu.Unlock()
 
 	if port > 0 {
-		killed, err := freePort(port)
+		// Another instance may own this port. Taking it still happens — free-port
+		// keeps one meaning — but both sides get a log line so the resulting
+		// death is auditable instead of a bare exit.
+		killed, err := freePortAudited(port, currentInstanceConfig(), func(line string) {
+			p.appendLog(line)
+			notify()
+		})
 		if err != nil {
 			p.mu.Lock()
 			if p.generation == generation {
@@ -910,7 +933,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f":
 			if p := m.current(); p != nil && p.Config.Port > 0 {
 				go func(proc *Process) {
-					killed, err := freePort(proc.Config.Port)
+					killed, err := freePortAudited(proc.Config.Port, currentInstanceConfig(), proc.appendLog)
 					if err != nil {
 						proc.appendLog("[stacker] free-port failed: " + err.Error())
 					} else if len(killed) == 0 {
@@ -1759,22 +1782,14 @@ func loadConfig(path string) (Config, error) {
 }
 
 func main() {
-	configPath, rest := parseArgs(os.Args[1:])
+	configPath, explicit, rest := parseArgs(os.Args[1:])
 	if len(rest) > 0 {
-		os.Exit(runCLI(configPath, rest))
+		os.Exit(runCLI(configPath, explicit, rest))
 	}
-
-	// Bare `stacker` with a running serve instance attaches the TUI.
-	// If the default stacker.yml is not running but exactly one serve is up
-	// (e.g. --config codebunker.yml serve -d), attach to that one.
-	if st, used, fallback, err := resolveRunningInstance(configPath); err == nil && st != nil && st.Mode == "serve" {
-		if fallback {
-			fmt.Fprintf(os.Stderr, "note: attaching to only running config %s\n", used)
-		}
-		os.Exit(runAttach(used))
-	}
-
-	os.Exit(runSession(configPath))
+	// A bare `stacker` resolves through the launch table: attach to this
+	// config's supervisor, start it, or offer a choice among live instances.
+	// It never silently adopts an instance belonging to another config.
+	os.Exit(runTUI(configPath, explicit, true))
 }
 
 // runSession starts supervisor + TUI in one process (default interactive mode).
@@ -1791,6 +1806,9 @@ func runSession(configPath string) int {
 
 	m := newModel(cfg)
 	m.mode = "session"
+	// Another supervisor may already hold ports this config declares; free-port
+	// would terminate those listeners without this heads-up.
+	m.statusText = otherInstancesNotice(configPath, cfg)
 	control, err := startControlServer(m, configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "control plane error:", err)
@@ -1828,7 +1846,12 @@ func runSession(configPath string) int {
 
 // parseArgs extracts -config and leaves CLI subcommands in rest.
 // Examples: stacker list --json | stacker -config app.yml restart api
-func parseArgs(args []string) (configPath string, rest []string) {
+//
+// explicit reports whether -config/--config was actually passed. The default
+// value is a path a user may well type by hand, so without this flag an
+// explicit `--config stacker.yml` is indistinguishable from bare `stacker` —
+// and the instance fallback then overrides a config the user did name.
+func parseArgs(args []string) (configPath string, explicit bool, rest []string) {
 	configPath = "stacker.yml"
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -1839,14 +1862,18 @@ func parseArgs(args []string) (configPath string, rest []string) {
 		case a == "-v" || a == "--version" || a == "-version":
 			rest = append(rest, "version")
 		case a == "-config" || a == "--config":
+			// A dangling flag carries no choice, so it stays non-explicit.
 			if i+1 < len(args) {
 				i++
 				configPath = args[i]
+				explicit = true
 			}
 		case strings.HasPrefix(a, "-config="):
 			configPath = strings.TrimPrefix(a, "-config=")
+			explicit = true
 		case strings.HasPrefix(a, "--config="):
 			configPath = strings.TrimPrefix(a, "--config=")
+			explicit = true
 		case a == "-json" || a == "--json":
 			rest = append(rest, a)
 		default:
@@ -1859,7 +1886,7 @@ func parseArgs(args []string) (configPath string, rest []string) {
 			rest = append(rest, a)
 		}
 	}
-	return configPath, rest
+	return configPath, explicit, rest
 }
 
 func clamp(v, low, high int) int {

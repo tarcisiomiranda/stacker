@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stacker</title>
+<title>{{if .ConfigLabel}}{{.ConfigLabel}} · {{end}}Stacker</title>
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <style>
 /* Minimal fallback so the page stays usable if the Tailwind CDN is offline. */
@@ -12,7 +12,8 @@ body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
 </head>
 <body class="bg-neutral-950 text-neutral-200 font-mono min-h-screen text-sm">
 <div class="max-w-xl mx-auto p-8">
-  <h1 class="font-bold text-base mb-1">Stacker</h1>
+  <h1 class="font-bold text-base mb-1">Stacker{{if .ConfigLabel}} <span class="text-neutral-400 font-normal">· {{.ConfigLabel}}</span>{{end}}</h1>
+  {{if .OtherInstances}}<p class="text-amber-500 text-xs mb-1">{{.OtherInstances}} other instance(s) running</p>{{end}}
   <p class="text-neutral-500 mb-6 break-all">{{.Config}}</p>
   <nav class="flex flex-col border border-neutral-800 divide-y divide-neutral-800">
     {{range .Processes}}

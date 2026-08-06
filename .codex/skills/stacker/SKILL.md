@@ -33,8 +33,8 @@ stacker list --json
 
 | Result | Meaning | What you do |
 |--------|---------|-------------|
-| exit 0 / `"running": true` | TUI control plane is up | Use CLI only (`start` / `stop` / `restart`) |
-| exit 1 / not running | No Stacker for this config | Ask the user to open `stacker -config stacker.yml`. Optionally `free-port` if a bind is stuck. **Do not** invent a second supervisor. |
+| exit 0 / `"running": true` | Supervisor up (session or serve) | Use CLI only (`start` / `stop` / `restart`) |
+| exit 1 / not running | No Stacker for this config | Ask the user to open `stacker` or `stacker serve -d`. Optionally `free-port` if a bind is stuck. **Do not** invent a second supervisor. |
 | `stacker` not found | Binary missing | Say Stacker is not installed; do not background services unless the user asks. |
 
 Always use the same `-config` path the human uses (default `stacker.yml` in cwd).
@@ -94,10 +94,15 @@ processes:
 
 1. **If `stacker ping` succeeds → only control services through Stacker CLI.**
 2. **Do not** `nohup`, background shells, or open a second terminal for the same service.
-3. **Do not** start a second `stacker` TUI for the same config (it will refuse).
+3. **Do not** start a second Stacker instance for the same config (it will refuse). Prefer `stacker serve -d` for background, then CLI/`attach`.
 4. After changing app code that is already running under Stacker, use `stacker restart <name>`.
-5. When leaving a project, `stacker stop <name>` (or ask the user to) so the next project can bind ports.
+5. When leaving a project, `stacker stop <name>` or `stacker down` so the next project can bind ports.
 6. Read project `stacker.yml` and any `AGENTS.md` before editing config fields.
+7. You may edit `stacker.yml` while Stacker runs — it hot-reloads (add/remove/reorder). Do not kill the supervisor just to add a process.
+8. **Always pass `--config`.** Several projects can be supervised at once, and without the flag a command may resolve to a different instance. With the flag, the config you name is honoured unconditionally — a config that exists on disk is never swapped for another instance.
+9. **Never run a state-changing command without `--config`.** `start`, `stop`, `restart`, `run` and `down` refuse to adopt another instance and will error; that error is correct, so add `--config` instead of retrying.
+10. Use `stacker instances --json` to see every supervisor on the machine (label, config, pid, mode, ports, and `port_collisions`).
+11. If two configs declare the same port, starting one **terminates** the other's listener. `port_collisions` in `stacker instances --json` tells you before it happens; both logs record it after.
 
 ## 6. Quick decision tree
 
@@ -107,19 +112,34 @@ Need a long-running service?
        ├─ no  → start service the project's normal way (mise/task), or ask user
        └─ yes → stacker ping
                  ├─ running → stacker list/status → start|restart|stop
-                 └─ not running → ask user to open Stacker TUI
+                 └─ not running → ask user to open stacker / stacker serve -d
                                   (optional: stacker free-port N if blocked)
+
+Always with --config <path>. Got "no running Stacker" while another instance
+is listed? That is deliberate — the named config wins. Do not retry without
+the flag; either use --config for that config, or ask the user.
 ```
 
 ## 7. CLI cheat sheet
 
 ```bash
-stacker -config stacker.yml     # start TUI + control plane (human)
+stacker -config stacker.yml     # session TUI + control plane (human)
+stacker serve -d                # headless daemon
+stacker attach                  # TUI attach (q detaches)
+stacker down                    # stop everything + supervisor
 stacker ping --json
 stacker list --json
 stacker status <name> --json
 stacker start <name>
 stacker stop <name>
 stacker restart <name>
-stacker free-port <port>        # no TUI required
+stacker free-port <port>        # no instance required
+stacker instances --json        # every supervisor on this machine
+```
+
+Prefix every one of these with `--config <path>` in real use:
+
+```bash
+stacker --config ./stacker.yml list --json
+stacker --config ./stacker.yml restart backend
 ```

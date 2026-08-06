@@ -135,28 +135,62 @@ processes:
 }
 
 func TestParseArgs(t *testing.T) {
-	cfg, rest := parseArgs([]string{"-config", "app.yml", "restart", "backend", "--json"})
-	if cfg != "app.yml" {
-		t.Fatalf("config: %q", cfg)
+	cfg, explicit, rest := parseArgs([]string{"-config", "app.yml", "restart", "backend", "--json"})
+	if cfg != "app.yml" || !explicit {
+		t.Fatalf("config: %q explicit: %v", cfg, explicit)
 	}
 	if len(rest) != 3 || rest[0] != "restart" || rest[1] != "backend" || rest[2] != "--json" {
 		t.Fatalf("rest: %#v", rest)
 	}
 
-	cfg2, rest2 := parseArgs([]string{"--config", "./stacker.yml", "a"})
-	if cfg2 != "./stacker.yml" {
-		t.Fatalf("--config path: %q", cfg2)
+	cfg2, explicit2, rest2 := parseArgs([]string{"--config", "./stacker.yml", "a"})
+	if cfg2 != "./stacker.yml" || !explicit2 {
+		t.Fatalf("--config path: %q explicit: %v", cfg2, explicit2)
 	}
 	if len(rest2) != 1 || rest2[0] != "a" {
 		t.Fatalf("rest for attach alias: %#v", rest2)
 	}
 
-	cfg3, rest3 := parseArgs([]string{"--config=proj.yml", "attach"})
-	if cfg3 != "proj.yml" {
-		t.Fatalf("--config= path: %q", cfg3)
+	cfg3, explicit3, rest3 := parseArgs([]string{"--config=proj.yml", "attach"})
+	if cfg3 != "proj.yml" || !explicit3 {
+		t.Fatalf("--config= path: %q explicit: %v", cfg3, explicit3)
 	}
 	if len(rest3) != 1 || rest3[0] != "attach" {
 		t.Fatalf("rest for attach: %#v", rest3)
+	}
+}
+
+// Honouring an explicit --config requires knowing it was passed at all: the
+// default value is the same string a user types, so without this flag `stacker
+// --config stacker.yml` was indistinguishable from bare `stacker` and silently
+// attached to an unrelated project.
+func TestParseArgsReportsWhetherConfigWasExplicit(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantPath string
+		wantSet  bool
+	}{
+		{"no args", nil, "stacker.yml", false},
+		{"subcommand only", []string{"list"}, "stacker.yml", false},
+		{"json flag only", []string{"list", "--json"}, "stacker.yml", false},
+		{"single dash separate", []string{"-config", "a.yml"}, "a.yml", true},
+		{"double dash separate", []string{"--config", "a.yml"}, "a.yml", true},
+		{"single dash equals", []string{"-config=a.yml"}, "a.yml", true},
+		{"double dash equals", []string{"--config=a.yml"}, "a.yml", true},
+		// Typing the default path by hand is still an explicit choice.
+		{"explicit default name", []string{"--config", "stacker.yml"}, "stacker.yml", true},
+		// A dangling flag with no value must not claim to be explicit.
+		{"dangling flag", []string{"--config"}, "stacker.yml", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, explicit, _ := parseArgs(tc.args)
+			if path != tc.wantPath || explicit != tc.wantSet {
+				t.Fatalf("parseArgs(%#v) = (%q, %v), want (%q, %v)",
+					tc.args, path, explicit, tc.wantPath, tc.wantSet)
+			}
+		})
 	}
 }
 
