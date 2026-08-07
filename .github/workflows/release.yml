@@ -1,13 +1,20 @@
 name: Release
 
+# Triggers:
+# - push of a SemVer tag (v0.11.0, v1.2.3-rc.1, …)
+# - manual "Run workflow" with the tag name (reliable fallback when tag
+#   webhooks do not fire; the tag must already exist on the remote)
 on:
   push:
+    # GitHub tag filters are globs (not full regex). `v*` matches every release
+    # tag we publish (v0.11.0, v1.2.3-rc.1, …). Keep this broad — a missed
+    # webhook is fixed via workflow_dispatch, not a tighter pattern.
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "SemVer tag to create, for example v1.2.3"
+        description: "Existing SemVer tag to publish, for example v1.2.3"
         required: true
         type: string
 
@@ -19,7 +26,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Always the SemVer tag — never the branch name (workflow_dispatch sets
+  # GITHUB_REF_NAME to "main", which must not end up in binary ldflags).
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  # Prefer precompiled CPython from astral (no source build / missing _bz2).
+  MISE_PYTHON_COMPILE: "false"
 
 jobs:
   test:
@@ -28,6 +39,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Tag pushes check out the tagged commit; dispatch uses the chosen
+          # branch (default main). Full history is not required for tests.
+          fetch-depth: 1
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install tools
         uses: jdx/mise-action@v4
@@ -73,6 +89,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install Go
         uses: jdx/mise-action@v4
@@ -89,7 +107,7 @@ jobs:
           mkdir -p dist
           mise exec -- go build \
             -trimpath \
-            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -ldflags="-s -w -X main.version=${RELEASE_TAG}" \
             -o "dist/stacker-${GOOS}-${GOARCH}" \
             ./cmd/stacker
 
@@ -115,6 +133,7 @@ jobs:
           # Full history + tags: release.py prefers releases/<tag>.yaml notes,
           # and falls back to commit subjects since the previous SemVer tag.
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install Python
         uses: jdx/mise-action@v4
@@ -136,6 +155,7 @@ jobs:
       - name: Publish release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: mise exec -- python .github/scripts/release.py
 
       - name: Write summary

@@ -1,8 +1,16 @@
 min_version = "2026.7.0"
 
+# Precompiled CPython (astral python-build-standalone). Without this, mise may
+# fall back to python-build and produce a broken interpreter on GitHub Actions
+# (missing _bz2 / readline / _lzma when libbz2-dev is not installed).
+[settings]
+python.compile = false
+
 [tools]
 go = "1.24"
-python = "3.13"
+# 3.12 has reliable precompiled builds on linux/darwin; 3.13.x recently fell
+# through to source compile on ubuntu-latest and broke extension modules.
+python = "3.12"
 shellcheck = "0.11"
 
 [tasks.setup]

@@ -326,14 +326,21 @@ The bundled `stacker.yml` has a self-contained `demo` process so you can try log
 
 ## Releases
 
-`.github/workflows/release.yml` publishes releases for SemVer tags. It runs tests and `go vet`, builds CGO-disabled binaries for Linux and macOS on AMD64 and ARM64, generates `checksums.txt`, builds release notes from the commit messages since the previous tag, and attaches all artifacts to the GitHub Release.
+`.github/workflows/release.yml` publishes releases for SemVer tags. It runs tests and `go vet`, builds CGO-disabled binaries for Linux and macOS on AMD64 and ARM64, generates `checksums.txt`, builds release notes from `releases/<tag>.yaml` (or commit messages), and attaches all artifacts to the GitHub Release.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+# 1. Commit release notes (optional but preferred)
+#    releases/v0.11.0.yaml
+
+# 2. Tag the commit and push
+git tag -a v0.11.0 -m "v0.11.0"
+git push origin main
+git push origin v0.11.0
 ```
 
-You can also trigger the workflow manually from the Actions tab with a tag. The pipeline creates no commits and does not modify `main`.
+If the tag is on GitHub but **Actions never starts** (tag webhook missed), open **Actions → Release → Run workflow**, set the tag (e.g. `v0.11.0`), and run it on `main`. Manual dispatch uses the same `RELEASE_TAG` for binary version stamping and the GitHub Release name — it does not invent a new tag.
+
+The pipeline creates no commits and does not modify `main`.
 
 ## Current limitations
 

@@ -1,0 +1,26 @@
+# Hand-written release notes for v0.11.1.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.11.1
+
+highlights: |
+  Same features as v0.11.0 (instance disambiguation, picker, port reclaim
+  audit). This patch re-publishes with a correct binary version string and a
+  more reliable Release workflow (precompiled Python in CI, version from
+  RELEASE_TAG on manual dispatch).
+
+features:
+  - "**Instance resolution** — explicit `--config` always wins; bare `stacker` opens a picker when other supervisors are live"
+  - "**Instance picker** — `↑↓` · `enter` · `n` start local · `d` stop · `r` refresh · `q`; no-TTY prints the list and exits 1"
+  - "**`stacker instances` / `ins`** — every supervisor on the machine (`--json` includes `port_collisions`)"
+  - "**Safe CLI fallback** — read-only commands adopt the only live instance only when the target config is missing on disk; mutations never adopt"
+  - "**Port reclaim audit** — free-port across instances leaves a log line on both sides"
+  - "**Web project identity** — log page title/sidebar name the config"
+
+fixes:
+  - "**Release CI Python** — force precompiled CPython in mise (no source build missing `_bz2` / `readline` / `_lzma` on Actions)"
+  - "**Binary version on manual dispatch** — stamp `main.version` from `RELEASE_TAG`, not `GITHUB_REF_NAME` (which is the branch name on workflow_dispatch)"
+  - "**Checkout ref on dispatch** — build/publish from the tagged commit, not only the default branch tip"
+
+changes:
+  - "Release workflow tag filters use explicit SemVer patterns; README documents re-run via Actions when a tag push does not start CI"
