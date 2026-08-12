@@ -49,6 +49,70 @@ func TestProcessListRowsFitPanel(t *testing.T) {
 	}
 }
 
+// Selected rows with a color dot must reverse the whole plain name, not nest
+// the colored ● inside Reverse (that closes reverse early on the ball).
+func TestProcessListSelectionCoversNameWithColorDot(t *testing.T) {
+	m := newModel(Config{Processes: map[string]ProcessConfig{
+		"myapp": {Command: "true", Color: "#38bdf8", Autostart: true},
+	}})
+	m.width = 80
+
+	var selected string
+	for _, line := range strings.Split(m.processList(), "\n") {
+		if strings.Contains(ansi.Strip(line), "myapp") {
+			selected = line
+			break
+		}
+	}
+	if selected == "" {
+		t.Fatal("selected process line not found")
+	}
+	plain := ansi.Strip(selected)
+	if !strings.Contains(plain, "●") || !strings.Contains(plain, "myapp") {
+		t.Fatalf("expected plain row with dot+name, got %q", plain)
+	}
+	// Reverse must wrap plain text only — no nested SGR before the name.
+	want := selectedProcessStyle.Render(plain)
+	if selected != want {
+		t.Fatalf("selection did not cover full plain row\ngot  %q\nwant %q", selected, want)
+	}
+}
+
+func TestFormatProcessListLineSelectedIgnoresNestedColors(t *testing.T) {
+	got := formatProcessListLine(processListLine{
+		name:         "api",
+		status:       "running",
+		statusKind:   "running",
+		color:        "red",
+		selected:     true,
+		contentWidth: 40,
+	})
+	plain := ansi.Strip(got)
+	if got != selectedProcessStyle.Render(plain) {
+		t.Fatalf("selected line must be reverse(plain), got %q plain %q", got, plain)
+	}
+	if !strings.HasPrefix(plain, "● api") {
+		t.Fatalf("plain row should start with colored-ball placeholder + name, got %q", plain)
+	}
+
+	// Unselected keeps a colored ● / status when the terminal profile allows
+	// it; without a TTY lipgloss may strip colors, so only assert structure.
+	unsel := formatProcessListLine(processListLine{
+		name:         "api",
+		status:       "running",
+		statusKind:   "running",
+		color:        "red",
+		selected:     false,
+		contentWidth: 40,
+	})
+	if !strings.Contains(ansi.Strip(unsel), "api") {
+		t.Fatalf("unselected row missing name: %q", unsel)
+	}
+	if strings.HasPrefix(ansi.Strip(unsel), "● api") == false {
+		t.Fatalf("unselected plain should start with ● api, got %q", ansi.Strip(unsel))
+	}
+}
+
 func TestCaptureSanitizesTerminalControlSequences(t *testing.T) {
 	p := NewProcess("test", ProcessConfig{}, 10)
 	p.capture(strings.NewReader("\x1b[31mINFO\x1b[0m\trequest\rrewrite\a\n"), "stderr", func() {})

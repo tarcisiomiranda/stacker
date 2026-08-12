@@ -13,6 +13,7 @@ processes:
     cwd: .
     autostart: false
     graceful_timeout: 8s
+    color: "#38bdf8"
     # port: 8000   # free this port before start/restart (kills external holders)
 
   frontend:
@@ -20,6 +21,7 @@ processes:
     cwd: .
     autostart: false
     graceful_timeout: 8s
+    color: "#a78bfa"
     # port: 3000
 
   demo:
@@ -27,6 +29,7 @@ processes:
     cwd: .
     autostart: true
     graceful_timeout: 3s
+    color: "#34d399"
     tasks:  # per-process one-shot: TUI `t`, web More ▾ → Tasks, or `stacker run demo <task>`
       date: date
       list-files: ls -la

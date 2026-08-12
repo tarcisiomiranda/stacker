@@ -1264,46 +1264,95 @@ func (m *model) processList() string {
 	for i, p := range m.processes {
 		processStatus := p.Status()
 		status := oneShotStatusLabel(p, processStatus)
-		statusRendered := status
-		// Error badge: detected error lines turn the status orange with a "!"
-		// even while running; a real failed status stays red.
-		if errs := p.Errors(); errs > 0 && processStatus != StatusFailed {
+		errs := p.Errors()
+		if errs > 0 && processStatus != StatusFailed {
 			status += "!"
-			statusRendered = errorBadgeStyle.Render(status)
-		} else if processStatus == StatusRunning {
-			statusRendered = runningStyle.Render(status)
-		} else if processStatus == StatusFailed {
-			statusRendered = failedStyle.Render(status)
-		}
-		marker := ""
-		markerWidth := 0
-		if p.oneShot {
-			marker = "▶ "
-			markerWidth = 2
-		}
-		dot := ""
-		dotWidth := 0
-		if c := p.Color(); c != "" {
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("●") + " "
-			dotWidth = 2
 		}
 		name := sanitizeLogLine(p.Name)
 		if p.orphaned {
 			name = name + " ⚠"
 		}
-		contentWidth := max(1, m.leftWidth()-5)
-		nameWidth := max(1, contentWidth-len(status)-1-dotWidth-markerWidth)
-		name = truncate(name, nameWidth)
-		line := marker + dot + name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
-		if i == m.selected {
-			line = selectedProcessStyle.Render(line)
-		}
+		line := formatProcessListLine(processListLine{
+			name:         name,
+			status:       status,
+			statusKind:   processStatusKind(processStatus, errs),
+			color:        p.Color(),
+			oneShot:      p.oneShot,
+			selected:     i == m.selected,
+			contentWidth: max(1, m.leftWidth()-5),
+		})
 		b.WriteString(line)
 		if i+1 < len(m.processes) {
 			b.WriteByte('\n')
 		}
 	}
 	return b.String()
+}
+
+// processListLine is the input for one sidebar row (session + attach).
+type processListLine struct {
+	name         string
+	status       string
+	statusKind   string // "", "running", "failed", "error"
+	color        string
+	oneShot      bool
+	selected     bool
+	contentWidth int
+}
+
+func processStatusKind(status ProcessStatus, errs int) string {
+	if errs > 0 && status != StatusFailed {
+		return "error"
+	}
+	switch status {
+	case StatusRunning:
+		return "running"
+	case StatusFailed:
+		return "failed"
+	default:
+		return ""
+	}
+}
+
+// formatProcessListLine builds a sidebar row. When selected, reverse is applied
+// to plain text only — nested color SGR from the dot/status would otherwise
+// reset reverse so the highlight sticks on the ball instead of the whole name.
+func formatProcessListLine(in processListLine) string {
+	marker := ""
+	markerWidth := 0
+	if in.oneShot {
+		marker = "▶ "
+		markerWidth = 2
+	}
+	dotWidth := 0
+	if in.color != "" {
+		dotWidth = 2
+	}
+	nameWidth := max(1, in.contentWidth-len(in.status)-1-dotWidth-markerWidth)
+	name := truncate(in.name, nameWidth)
+	pad := strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name)))
+	plain := marker
+	if in.color != "" {
+		plain += "● "
+	}
+	plain += name + pad + " " + in.status
+	if in.selected {
+		return selectedProcessStyle.Render(plain)
+	}
+	dot := ""
+	if in.color != "" {
+		dot = lipgloss.NewStyle().Foreground(lipgloss.Color(in.color)).Render("●") + " "
+	}
+	statusRendered := in.status
+	switch in.statusKind {
+	case "error":
+		statusRendered = errorBadgeStyle.Render(in.status)
+	case "running":
+		statusRendered = runningStyle.Render(in.status)
+	case "failed":
+		statusRendered = failedStyle.Render(in.status)
+	}
+	return marker + dot + name + pad + " " + statusRendered
 }
 
 // oneShotStatusLabel maps a stopped one-shot to "idle" so a finished run does

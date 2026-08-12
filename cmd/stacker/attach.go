@@ -456,38 +456,28 @@ func (m *attachModel) processList() string {
 	}
 	for i, p := range m.procs {
 		status := p.Status
-		statusRendered := status
+		kind := ""
 		if p.Errors > 0 && status != "failed" {
 			status += "!"
-			statusRendered = errorBadgeStyle.Render(status)
+			kind = "error"
 		} else if status == "running" {
-			statusRendered = runningStyle.Render(status)
+			kind = "running"
 		} else if status == "failed" {
-			statusRendered = failedStyle.Render(status)
-		}
-		marker := ""
-		markerWidth := 0
-		if p.OneShot {
-			marker = "▶ "
-			markerWidth = 2
-		}
-		dot := ""
-		dotWidth := 0
-		if p.Color != "" {
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color)).Render("●") + " "
-			dotWidth = 2
+			kind = "failed"
 		}
 		name := sanitizeLogLine(p.Name)
 		if p.Orphaned {
 			name += " ⚠"
 		}
-		contentWidth := max(1, m.leftWidth()-5)
-		nameWidth := max(1, contentWidth-len(status)-1-dotWidth-markerWidth)
-		name = truncate(name, nameWidth)
-		line := marker + dot + name + strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name))) + " " + statusRendered
-		if i == m.selected {
-			line = selectedProcessStyle.Render(line)
-		}
+		line := formatProcessListLine(processListLine{
+			name:         name,
+			status:       status,
+			statusKind:   kind,
+			color:        p.Color,
+			oneShot:      p.OneShot,
+			selected:     i == m.selected,
+			contentWidth: max(1, m.leftWidth()-5),
+		})
 		b.WriteString(line)
 		if i+1 < len(m.procs) {
 			b.WriteByte('\n')
