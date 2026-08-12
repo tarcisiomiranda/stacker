@@ -4,10 +4,9 @@
 tag: v0.11.1
 
 highlights: |
-  Same features as v0.11.0 (instance disambiguation, picker, port reclaim
-  audit). This patch re-publishes with a correct binary version string and a
-  more reliable Release workflow (precompiled Python in CI, version from
-  RELEASE_TAG on manual dispatch).
+  Patch on top of v0.11.0: TUI process-list selection no longer collapses onto
+  the color dot, plus a more reliable Release workflow (precompiled Python in
+  CI, binary version from RELEASE_TAG on manual dispatch).
 
 features:
   - "**Instance resolution** — explicit `--config` always wins; bare `stacker` opens a picker when other supervisors are live"
@@ -18,9 +17,11 @@ features:
   - "**Web project identity** — log page title/sidebar name the config"
 
 fixes:
+  - "**TUI selection + color dot** — reverse highlight covers the full process name; nested ANSI from the colored `●` no longer closes reverse early on the ball (session and attach)"
   - "**Release CI Python** — force precompiled CPython in mise (no source build missing `_bz2` / `readline` / `_lzma` on Actions)"
   - "**Binary version on manual dispatch** — stamp `main.version` from `RELEASE_TAG`, not `GITHUB_REF_NAME` (which is the branch name on workflow_dispatch)"
   - "**Checkout ref on dispatch** — build/publish from the tagged commit, not only the default branch tip"
 
 changes:
+  - "Shared `formatProcessListLine` for session and attach sidebars"
   - "Release workflow tag filters use explicit SemVer patterns; README documents re-run via Actions when a tag push does not start CI"
