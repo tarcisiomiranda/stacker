@@ -1,0 +1,35 @@
+# Hand-written release notes for v0.12.0.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.12.0
+
+highlights: |
+  Logs stop being TUI-only: `stacker logs` reads a process over a pipe, with
+  `--since` for incremental reads and `--supervisor` for the daemon's own file.
+  Shell completion for bash, zsh and fish lists the live processes with their
+  status, so finding a log needs no memory. A missing `cwd` now disables one
+  entry instead of rejecting the whole config, which makes a shared
+  stacker.yml usable on machines that cloned only some of the repos.
+
+features:
+  - "**`stacker logs <name>`** — tail a process without a TUI: `-n N` (default 200), `--all`, `--json`"
+  - "**Incremental reads** — every `--json` reply carries `next`; pass it back as `--since <next>` for only the new lines (the pattern to use instead of `-f`)"
+  - "**`stacker logs -f`** — follow until Ctrl+C, for humans"
+  - "**`stacker logs --supervisor`** — the daemon's own log file, read directly, so it still answers when the supervisor died or never started"
+  - "**Shell completion** — `stacker completion <bash|zsh|fish>`; scripts are embedded in the binary and cannot drift from its commands"
+  - "**Dynamic candidates** — `stacker logs <TAB>` lists the live processes; zsh and fish show `running · :3001` beside each name, plus tasks, per-command flags and `--config` paths"
+  - "**`ui.max_log_bytes`** — per-process memory budget for retained logs, default 256MB; accepts `256MB`, `512kb` or a byte count, and applies alongside `max_log_lines`"
+  - "**`mise run build:install`** — build for this machine and replace the `stacker` PATH resolves, installing completions into the directories each shell already loads"
+  - "**`nolines=1`** on `GET /v1/processes/{name}/logs` — ask how long a log is without shipping it"
+
+fixes:
+  - "**A missing `cwd` no longer rejects the config** — that entry alone loads as `disabled`, with the reason as its first log line, while every other process still starts; it never autostarts and never frees its port"
+  - "**Disabled entries recover without a restart** — `start` re-checks the directory, so cloning the repo and starting it is enough; a YAML edit re-evaluates it too"
+  - "**A vanished `cwd` no longer lies about a running service** — reload only marks an entry disabled once it is stopped"
+  - "**Log memory is bounded** — the line cap alone did not bound memory for services emitting huge lines"
+
+changes:
+  - "Bare `stacker` with no TTY prints the log commands for each running instance instead of only the list"
+  - "Instance picker: `l` prints copy-pasteable log commands, and the screen says where logs live"
+  - "`stacker list` and the control plane report the new `disabled` status"
+  - "New checks: `mise run test:completions` (drives bash and fish against a real supervisor) and `mise run test:install-local`"

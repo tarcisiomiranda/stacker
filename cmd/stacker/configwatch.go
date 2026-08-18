@@ -163,23 +163,26 @@ func (m *model) applyConfigDiff(cfg Config) {
 		if old, ok := oldByName[name]; ok && !old.oneShot {
 			old.mu.Lock()
 			old.Config = pc
-			if cfg.UI.MaxLogLines > 0 {
-				old.maxLogs = cfg.UI.MaxLogLines
-			}
+			old.setLogLimitsLocked(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
 			old.detectErrors = hl
 			if !hl {
 				old.errCount = 0
 			}
 			old.orphaned = false
 			old.mu.Unlock()
+			applyAvailability(old, cfg.unavailable[name])
 			yamlProcs = append(yamlProcs, old)
 			delete(oldByName, name)
 			continue
 		}
 		p := NewProcess(name, pc, cfg.UI.MaxLogLines)
 		p.detectErrors = hl
+		reason := cfg.unavailable[name]
+		if reason != "" {
+			p.Disable(reason)
+		}
 		yamlProcs = append(yamlProcs, p)
-		if pc.Autostart {
+		if pc.Autostart && reason == "" {
 			toAutostart = append(toAutostart, p)
 		}
 	}
@@ -214,15 +217,14 @@ func (m *model) applyConfigDiff(cfg Config) {
 		if old, ok := oldByName[name]; ok && old.oneShot {
 			old.mu.Lock()
 			old.Config = pc
-			if cfg.UI.MaxLogLines > 0 {
-				old.maxLogs = cfg.UI.MaxLogLines
-			}
+			old.setLogLimitsLocked(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
 			old.detectErrors = hl
 			if !hl {
 				old.errCount = 0
 			}
 			old.orphaned = false
 			old.mu.Unlock()
+			applyAvailability(old, cfg.unavailable[name])
 			yamlTasks = append(yamlTasks, old)
 			delete(oldByName, name)
 			continue
@@ -231,6 +233,9 @@ func (m *model) applyConfigDiff(cfg Config) {
 		p := NewProcess(name, pc, cfg.UI.MaxLogLines)
 		p.oneShot = true
 		p.detectErrors = hl
+		if reason := cfg.unavailable[name]; reason != "" {
+			p.Disable(reason)
+		}
 		yamlTasks = append(yamlTasks, p)
 	}
 
@@ -284,6 +289,21 @@ func (m *model) applyConfigDiff(cfg Config) {
 	if n := len(orphanSvcs) + len(orphanTasks); n > 0 {
 		m.statusText = fmt.Sprintf("Config reloaded (%d removed still running — stop to drop)", n)
 	}
+}
+
+// applyAvailability syncs the disabled marker of a surviving entry after a
+// reload. An active process is left alone: if its cwd vanished mid-run it
+// keeps running until it stops, instead of reporting a status it does not have.
+func applyAvailability(p *Process, reason string) {
+	switch p.Status() {
+	case StatusRunning, StatusStarting, StatusStopping:
+		return
+	}
+	if reason != "" {
+		p.Disable(reason)
+		return
+	}
+	p.Enable()
 }
 
 // pruneOrphans drops orphaned processes that have finished so the list

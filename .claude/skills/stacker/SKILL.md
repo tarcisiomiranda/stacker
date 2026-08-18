@@ -2,11 +2,12 @@
 name: stacker
 description: >
   Manage long-running project services through Stacker instead of starting them
-  in parallel. Use when starting, stopping, or restarting APIs or frontends;
-  when a port is already in use; when stacker.yml exists; or when the user
-  mentions Stacker, dev processes, process supervisor, free-port, or service
-  restart. Compatible with Claude Code, Codex, OpenCode, Cursor, Grok, and
-  other Agent Skills clients.
+  in parallel, and read their logs without opening a TUI. Use when starting,
+  stopping, or restarting APIs or frontends; when reading the output of a
+  running service or daemon; when a port is already in use; when stacker.yml
+  exists; or when the user mentions Stacker, dev processes, process supervisor,
+  logs, free-port, or service restart. Compatible with Claude Code, Codex,
+  OpenCode, Cursor, Grok, and other Agent Skills clients.
 license: MIT
 metadata:
   author: stacker
@@ -56,7 +57,55 @@ stacker restart backend
 
 Process names come from keys under `processes:` in `stacker.yml` — never guess.
 
-## 3. Port already in use
+## 3. Reading logs (do this instead of opening the TUI)
+
+Process output lives in the supervisor's memory. `stacker logs` is the only
+sane way for an agent to read it — the TUI and the web viewer are for humans.
+
+| You want | Command |
+|---|---|
+| What a service just printed | `stacker --config X logs back -n 100` |
+| Machine-readable + a resume point | `stacker --config X logs back --json` |
+| Only what is new since last read | `stacker --config X logs back --since <next> --json` |
+| Everything still retained | `stacker --config X logs back --all` |
+| Why `serve -d` / `ping` failed | `stacker --config X logs --supervisor -n 50` |
+| The process names | `stacker --config X list --json` |
+
+Incremental reading is the important pattern. Each `--json` response carries
+`next`; keep it and pass it back as `--since` to get only the lines added since:
+
+```bash
+stacker --config ./stacker.yml logs back --json
+# {"ok":true,"process":"back","status":"running","from":40,"next":60,"lines":[...]}
+stacker --config ./stacker.yml logs back --since 60 --json   # only what came after
+```
+
+Rules:
+
+- **Never use `-f`.** It follows until Ctrl+C and will hang your turn. Poll
+  with `--since` instead.
+- **Default is the last 200 lines.** Ask for `-n N` deliberately; `--all` can
+  be enormous.
+- **`--supervisor` reads a file, not the control plane**, so it still answers
+  when the supervisor is dead or never started. It holds the daemon's own
+  notices — not process output.
+- Logs are **memory only**: they die with the supervisor and are capped per
+  process by `ui.max_log_lines` and `ui.max_log_bytes` (default 256MB).
+  Nothing is written to disk except the daemon log above.
+- A bare `stacker` with no TTY prints the running instances **and** the log
+  commands for each one; it never opens a UI you cannot answer.
+- Need names and statuses without a JSON parser? `stacker --config X __complete
+  processes` prints `name<TAB>status · :port` per line — the same source the
+  shell completion uses. `list --json` stays the richer answer when you can
+  parse JSON.
+
+**Tell the human about TAB.** When you hand over a log command, it is worth
+mentioning that `stacker completion <bash|zsh|fish>` (installed automatically by
+`mise run build:install`) makes `stacker logs <TAB>` list every process with its
+status — that is the fluent way for a person to find a log, and it is not
+discoverable otherwise.
+
+## 4. Port already in use
 
 If start/restart fails because the port is busy (often another agent left a server):
 
@@ -73,10 +122,13 @@ stacker start backend
 
 In the TUI, the user can press **`f`** on a selected process that has `port` set.
 
-## 4. YAML contract (do not invent fields)
+## 5. YAML contract (do not invent fields)
 
 ```yaml
 version: 1
+ui:
+  max_log_lines: 10000   # per-process line cap (default 10000)
+  max_log_bytes: 256MB   # per-process memory cap (default 256MB)
 processes:
   backend:
     command: mise run back:dev
@@ -87,10 +139,18 @@ processes:
 ```
 
 - `autostart: false` (default) → listed, not auto-started when Stacker opens.
+- `max_log_bytes` bounds the log memory of **each** process; accepts `256MB`,
+  `512kb`, or a plain byte count. Whichever cap hits first (lines or bytes)
+  drops the oldest lines. Raise it before raising `max_log_lines` a lot.
 - `port` → free listeners before start (fixes stray AI-started servers).
 - Unknown YAML fields are rejected by Stacker.
+- A `cwd` that does not exist on this machine (repo not cloned) does **not**
+  break the config: that entry alone shows status `disabled` and never starts
+  or frees its port. Do not delete such entries from a shared `stacker.yml` —
+  they work for whoever has the directory. Fix by cloning the repo, then
+  `stacker start <name>` (the directory is re-checked on start).
 
-## 5. Hard rules for agents
+## 6. Hard rules for agents
 
 1. **If `stacker ping` succeeds → only control services through Stacker CLI.**
 2. **Do not** `nohup`, background shells, or open a second terminal for the same service.
@@ -102,9 +162,10 @@ processes:
 8. **Always pass `--config`.** Several projects can be supervised at once, and without the flag a command may resolve to a different instance. With the flag, the config you name is honoured unconditionally — a config that exists on disk is never swapped for another instance.
 9. **Never run a state-changing command without `--config`.** `start`, `stop`, `restart`, `run` and `down` refuse to adopt another instance and will error; that error is correct, so add `--config` instead of retrying.
 10. Use `stacker instances --json` to see every supervisor on the machine (label, config, pid, mode, ports, and `port_collisions`).
-11. If two configs declare the same port, starting one **terminates** the other's listener. `port_collisions` in `stacker instances --json` tells you before it happens; both logs record it after.
+11. **Read logs with `stacker logs`, never by opening the TUI or the web viewer** (section 3), and never with `-f`.
+12. If two configs declare the same port, starting one **terminates** the other's listener. `port_collisions` in `stacker instances --json` tells you before it happens; both logs record it after.
 
-## 6. Quick decision tree
+## 7. Quick decision tree
 
 ```
 Need a long-running service?
@@ -112,15 +173,17 @@ Need a long-running service?
        ├─ no  → start service the project's normal way (mise/task), or ask user
        └─ yes → stacker ping
                  ├─ running → stacker list/status → start|restart|stop
+                 │            └─ need output? → stacker logs <name> -n 100
                  └─ not running → ask user to open stacker / stacker serve -d
                                   (optional: stacker free-port N if blocked)
+                                  (failed to start? stacker logs --supervisor)
 
 Always with --config <path>. Got "no running Stacker" while another instance
 is listed? That is deliberate — the named config wins. Do not retry without
 the flag; either use --config for that config, or ask the user.
 ```
 
-## 7. CLI cheat sheet
+## 8. CLI cheat sheet
 
 ```bash
 stacker -config stacker.yml     # session TUI + control plane (human)
@@ -133,9 +196,17 @@ stacker status <name> --json
 stacker start <name>
 stacker stop <name>
 stacker restart <name>
+stacker logs <name> -n 100      # tail of one process (default 200 lines)
+stacker logs <name> --json      # lines + "next" to resume from
+stacker logs <name> --since N   # only what came after index N
+stacker logs --supervisor       # daemon's own log; works with nothing running
 stacker free-port <port>        # no instance required
 stacker instances --json        # every supervisor on this machine
+stacker completion zsh          # completion script (bash | zsh | fish)
+stacker __complete processes    # names + status, no jq needed
 ```
+
+Never `stacker logs <name> -f` in an agent: it never returns.
 
 Prefix every one of these with `--config <path>` in real use:
 

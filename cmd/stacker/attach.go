@@ -457,7 +457,9 @@ func (m *attachModel) processList() string {
 	for i, p := range m.procs {
 		status := p.Status
 		kind := ""
-		if p.Errors > 0 && status != "failed" {
+		if status == "disabled" {
+			kind = "disabled"
+		} else if p.Errors > 0 && status != "failed" {
 			status += "!"
 			kind = "error"
 		} else if status == "running" {

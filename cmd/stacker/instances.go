@@ -24,7 +24,11 @@ type instanceSummary struct {
 	// Collide are ports this instance declares that another live instance also
 	// declares — the setup where starting one silently kills the other's service.
 	Collide []int
-	Err     string
+	// Sample is a representative process name used to print a copy-pasteable
+	// logs command. A running service wins: that is the log someone asking
+	// "what is it doing?" actually wants.
+	Sample string
+	Err    string
 }
 
 // labelInstances names each instance for display. The basename of the config's
@@ -87,6 +91,7 @@ func collectInstanceSummaries(all []InstanceState) []instanceSummary {
 			rows = append(rows, row)
 			continue
 		}
+		firstName, firstRunning := "", ""
 		for _, pi := range resp.Processes {
 			// One-shot tasks are not services; counting them would make the
 			// "n/total up" ratio meaningless.
@@ -94,13 +99,20 @@ func collectInstanceSummaries(all []InstanceState) []instanceSummary {
 				continue
 			}
 			row.Total++
+			if firstName == "" {
+				firstName = pi.Name
+			}
 			if pi.Status == string(StatusRunning) {
 				row.Up++
+				if firstRunning == "" {
+					firstRunning = pi.Name
+				}
 			}
 			if pi.Port > 0 {
 				row.Ports = append(row.Ports, pi.Port)
 			}
 		}
+		row.Sample = orDefault(firstRunning, firstName)
 		rows = append(rows, row)
 	}
 	markCollisions(rows)
@@ -167,11 +179,34 @@ func formatInstanceList(rows []instanceSummary, localConfig string) string {
 			b.WriteString("             starting one there terminates the listener here\n")
 		}
 		fmt.Fprintf(&b, "    attach: stacker --config %s a\n", shellQuote(row.State.Config))
+		fmt.Fprintf(&b, "    logs:   stacker --config %s logs %s\n",
+			shellQuote(row.State.Config), orDefault(row.Sample, "<process>"))
+	}
+	if len(rows) > 0 {
+		// Without this the only documented way in is the TUI, which is useless
+		// over a pipe and to an agent.
+		b.WriteString("\nReading logs without a TUI:\n")
+		b.WriteString("  stacker --config <cfg> list --json            # names and status\n")
+		b.WriteString("  stacker --config <cfg> logs <process> -n 100  # tail of one process\n")
+		b.WriteString("  stacker --config <cfg> logs --supervisor      # the daemon's own log\n")
 	}
 	if strings.TrimSpace(localConfig) != "" {
 		b.WriteString("\nTo start the config in this directory:\n")
 		fmt.Fprintf(&b, "  stacker --config %s\n", shellQuote(localConfig))
 	}
+	return b.String()
+}
+
+// formatLogHints is the copy-pasteable block the picker prints for one
+// instance (key `l`), for a user who wants a pipe instead of a TUI.
+func formatLogHints(row instanceSummary) string {
+	cfg := shellQuote(row.State.Config)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Logs for %s:\n\n", row.Label)
+	fmt.Fprintf(&b, "  stacker --config %s list                  # process names\n", cfg)
+	fmt.Fprintf(&b, "  stacker --config %s logs %s\n", cfg, orDefault(row.Sample, "<process>"))
+	fmt.Fprintf(&b, "  stacker --config %s logs %s -f            # follow\n", cfg, orDefault(row.Sample, "<process>"))
+	fmt.Fprintf(&b, "  stacker --config %s logs --supervisor     # daemon's own log\n", cfg)
 	return b.String()
 }
 

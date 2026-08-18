@@ -339,9 +339,21 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 				from = n
 			}
 		}
+		// nolines=1 answers "how far does the log go?" without shipping any
+		// lines, so a client that only wants the tail can ask for the right
+		// window instead of downloading everything and slicing locally.
+		if r.URL.Query().Get("nolines") == "1" {
+			next := p.LogNext()
+			writeJSON(w, map[string]any{
+				"ok": true, "from": next, "next": next, "lines": []string{},
+				"process": processInfo(p),
+			})
+			return
+		}
 		start, lines, next := p.TailLogs(from)
 		writeJSON(w, map[string]any{
 			"ok": true, "from": start, "next": next, "lines": lines,
+			"process":   processInfo(p),
 			"processes": cs.m.processInfos(),
 		})
 	case "start":

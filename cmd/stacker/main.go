@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,11 @@ type Config struct {
 	// display order in the TUI and web viewer.
 	processOrder []string
 	taskOrder    []string
+
+	// unavailable maps a process/task name to the reason its cwd cannot be
+	// used. Those entries load as disabled instead of failing the whole
+	// config, so a workspace where only some repos are cloned still starts.
+	unavailable map[string]string
 }
 
 // TaskConfig is a standalone one-shot command (root-level `tasks:`).
@@ -88,6 +94,11 @@ type UIConfig struct {
 	WheelLines    int  `yaml:"wheel_lines"`
 	CopyOnRelease bool `yaml:"copy_on_release"`
 	MaxLogLines   int  `yaml:"max_log_lines"`
+	// MaxLogBytes caps the memory one process's retained log may use. The line
+	// cap usually bites first; this bounds the pathological cases it misses —
+	// few but enormous lines, or a config that raises max_log_lines a lot.
+	// Accepts a byte count or a human size ("256MB"). Zero means the default.
+	MaxLogBytes byteSize `yaml:"max_log_bytes"`
 	// WordWrap is the initial wrap state for logs in the TUI and web viewer;
 	// both can toggle it at runtime (TUI key `W`, web checkbox).
 	WordWrap bool `yaml:"word_wrap"`
@@ -103,6 +114,99 @@ type UIConfig struct {
 	// Set to a free high port if 52911 is taken; the listener falls back to an
 	// ephemeral port when the preferred one is busy.
 	WebPort int `yaml:"web_port"`
+}
+
+// defaultMaxLogBytes is the per-process in-memory log budget when the config
+// does not set one.
+const defaultMaxLogBytes int64 = 256 << 20 // 256MB
+
+// minMaxLogBytes is the smallest budget worth accepting: below this the cap
+// would trim on almost every line and the log would be useless.
+const minMaxLogBytes int64 = 4 << 10 // 4KB
+
+// byteSize is a YAML scalar that accepts either a plain byte count
+// (max_log_bytes: 1048576) or a human size (256MB, 512kb, 1G). Units are
+// binary — this bounds memory, so 1MB is 1024*1024.
+type byteSize int64
+
+func (b *byteSize) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("expected a size like 256MB, got a %s", nodeKindName(node.Kind))
+	}
+	n, err := parseByteSize(node.Value)
+	if err != nil {
+		return err
+	}
+	*b = byteSize(n)
+	return nil
+}
+
+func nodeKindName(k yaml.Kind) string {
+	switch k {
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.SequenceNode:
+		return "sequence"
+	default:
+		return "non-scalar value"
+	}
+}
+
+// parseByteSize reads "256MB", "512kb", "1.5G", "0", or a bare byte count.
+func parseByteSize(s string) (int64, error) {
+	text := strings.TrimSpace(strings.ToUpper(s))
+	if text == "" {
+		return 0, nil
+	}
+	mult := int64(1)
+	for _, unit := range []struct {
+		suffixes []string
+		factor   int64
+	}{
+		{[]string{"GIB", "GB", "G"}, 1 << 30},
+		{[]string{"MIB", "MB", "M"}, 1 << 20},
+		{[]string{"KIB", "KB", "K"}, 1 << 10},
+		{[]string{"B"}, 1},
+	} {
+		matched := false
+		for _, suffix := range unit.suffixes {
+			if strings.HasSuffix(text, suffix) {
+				text = strings.TrimSpace(strings.TrimSuffix(text, suffix))
+				mult = unit.factor
+				matched = true
+				break
+			}
+		}
+		if matched {
+			break
+		}
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q; use a byte count or a value like 256MB", s)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("invalid size %q; cannot be negative", s)
+	}
+	bytes := int64(value * float64(mult))
+	if value > 0 && bytes <= 0 {
+		return 0, fmt.Errorf("invalid size %q; out of range", s)
+	}
+	return bytes, nil
+}
+
+// formatByteSize renders a size for humans (help output, log notices).
+func formatByteSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.4gGB", float64(n)/float64(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.4gMB", float64(n)/float64(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.4gKB", float64(n)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
 }
 
 type ProcessConfig struct {
@@ -129,6 +233,11 @@ const (
 	StatusRunning  ProcessStatus = "running"
 	StatusStopping ProcessStatus = "stopping"
 	StatusFailed   ProcessStatus = "failed"
+	// StatusDisabled is an entry whose cwd cannot be used (repo not cloned,
+	// path is a file, unreadable). It stays listed but inert: no autostart,
+	// no free-port, no start. Start re-checks the directory, so cloning the
+	// missing repo and starting it is enough to bring it back.
+	StatusDisabled ProcessStatus = "disabled"
 )
 
 type Process struct {
@@ -141,6 +250,9 @@ type Process struct {
 	// orphaned is set when the process was removed from stacker.yml while
 	// still running; it stays listed until it stops, then is pruned.
 	orphaned bool
+	// unavailable is the reason the cwd cannot be used; non-empty means the
+	// entry is disabled (see StatusDisabled). Guarded by mu like status.
+	unavailable string
 
 	mu sync.Mutex
 	// detectErrors mirrors ui.highlight_errors; toggled at runtime via the
@@ -150,6 +262,10 @@ type Process struct {
 	status       ProcessStatus
 	logs         []string
 	maxLogs      int
+	// maxLogBytes bounds the memory the retained lines may use; logBytes is
+	// the current estimate. Zero maxLogBytes means defaultMaxLogBytes.
+	maxLogBytes int64
+	logBytes    int64
 	// errCount is the number of error-looking output lines since the last
 	// start or mark (mark = user acknowledged them).
 	errCount int
@@ -167,13 +283,100 @@ func NewProcess(name string, cfg ProcessConfig, maxLogs int) *Process {
 	if maxLogs <= 0 {
 		maxLogs = 10_000
 	}
-	return &Process{Name: name, Config: cfg, status: StatusStopped, maxLogs: maxLogs}
+	return &Process{
+		Name:        name,
+		Config:      cfg,
+		status:      StatusStopped,
+		maxLogs:     maxLogs,
+		maxLogBytes: defaultMaxLogBytes,
+	}
 }
+
+// setLogLimits applies the configured caps; zero keeps the current value, so a
+// config that omits a field does not silently shrink an existing buffer.
+func (p *Process) setLogLimits(maxLines int, maxBytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.setLogLimitsLocked(maxLines, maxBytes)
+}
+
+func (p *Process) setLogLimitsLocked(maxLines int, maxBytes int64) {
+	if maxLines > 0 {
+		p.maxLogs = maxLines
+	}
+	if maxBytes > 0 {
+		p.maxLogBytes = maxBytes
+	}
+}
+
+// logLineCost approximates what one retained line costs in memory: its bytes
+// plus the string header it occupies in the slice. Exactness is not the point;
+// bounding a process that logs forever is.
+const logLineOverhead = int64(16)
+
+func logLineCost(line string) int64 { return int64(len(line)) + logLineOverhead }
 
 func (p *Process) Status() ProcessStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.status
+}
+
+// cwdProblem reports why a working directory cannot be used, or "" when it is
+// a usable directory. Any problem disables only the entry that declares it:
+// one missing clone must not stop the rest of the workspace from starting.
+func cwdProblem(cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		cwd = "."
+	}
+	info, err := os.Stat(cwd)
+	switch {
+	case os.IsNotExist(err):
+		return fmt.Sprintf("cwd %s does not exist", cwd)
+	case err != nil:
+		return fmt.Sprintf("cwd %s: %v", cwd, err)
+	case !info.IsDir():
+		return fmt.Sprintf("cwd %s is not a directory", cwd)
+	}
+	return ""
+}
+
+// Disable marks the entry unusable and logs the reason, so selecting it in the
+// TUI or web viewer explains itself instead of showing an empty log.
+func (p *Process) Disable(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.unavailable == reason && p.status == StatusDisabled {
+		return
+	}
+	p.unavailable = reason
+	p.status = StatusDisabled
+	p.appendLogLocked("[stacker] disabled: " + reason)
+}
+
+// Enable clears the disabled marker once the cwd is usable again.
+func (p *Process) Enable() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.enableLocked()
+}
+
+func (p *Process) enableLocked() {
+	if p.unavailable == "" {
+		return
+	}
+	p.unavailable = ""
+	if p.status == StatusDisabled {
+		p.status = StatusStopped
+	}
+	p.appendLogLocked("[stacker] enabled: cwd is available again")
+}
+
+// Unavailable is the reason this entry is disabled, empty when it can run.
+func (p *Process) Unavailable() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.unavailable
 }
 
 // Color is the only Config field mutated at runtime (TUI `c` / web selector),
@@ -244,13 +447,37 @@ func (p *Process) appendLog(line string) {
 	p.appendLogLocked(line)
 }
 
+// appendLogLocked keeps the log within both caps: the line count and the
+// memory budget. Trimming always drops the oldest lines, and normally drops
+// zero or one per append.
 func (p *Process) appendLogLocked(line string) {
 	p.logs = append(p.logs, line)
+	p.logBytes += logLineCost(line)
+
+	drop := 0
+	freed := int64(0)
 	if len(p.logs) > p.maxLogs {
-		overflow := len(p.logs) - p.maxLogs
-		p.dropped += overflow
-		p.logs = append([]string(nil), p.logs[overflow:]...)
+		drop = len(p.logs) - p.maxLogs
+		for i := 0; i < drop; i++ {
+			freed += logLineCost(p.logs[i])
+		}
 	}
+	limit := p.maxLogBytes
+	if limit <= 0 {
+		limit = defaultMaxLogBytes
+	}
+	// The newest line always survives: a single line larger than the whole
+	// budget is still worth showing, and an empty log helps nobody.
+	for p.logBytes-freed > limit && drop < len(p.logs)-1 {
+		freed += logLineCost(p.logs[drop])
+		drop++
+	}
+	if drop == 0 {
+		return
+	}
+	p.logBytes -= freed
+	p.dropped += drop
+	p.logs = append([]string(nil), p.logs[drop:]...)
 }
 
 // TailLogs returns lines from absolute index `from` on, plus the actual start
@@ -277,6 +504,21 @@ func (p *Process) Start(notify func()) error {
 	if p.cmd != nil || p.status == StatusRunning || p.status == StatusStarting || p.status == StatusStopping {
 		p.mu.Unlock()
 		return nil
+	}
+	// A disabled entry re-checks its cwd here: the usual fix is cloning the
+	// missing repo, which should not require restarting Stacker. This runs
+	// before free-port so a disabled process never kills a listener on a port
+	// it cannot use anyway.
+	if p.unavailable != "" {
+		if reason := cwdProblem(p.Config.Cwd); reason != "" {
+			p.unavailable = reason
+			p.status = StatusDisabled
+			p.appendLogLocked("[stacker] refused to start: " + reason)
+			p.mu.Unlock()
+			notify()
+			return fmt.Errorf("process %q is disabled: %s", p.Name, reason)
+		}
+		p.enableLocked()
 	}
 	p.status = StatusStarting
 	p.errCount = 0
@@ -533,6 +775,12 @@ func (p *Process) RunTask(name string, notify func()) error {
 		p.mu.Unlock()
 		return fmt.Errorf("unknown task %q for process %q", name, p.Name)
 	}
+	// Tasks run in the process cwd, so a disabled process has nowhere to run.
+	if p.unavailable != "" {
+		reason := p.unavailable
+		p.mu.Unlock()
+		return fmt.Errorf("process %q is disabled: %s", p.Name, reason)
+	}
 	if p.runningTasks == nil {
 		p.runningTasks = map[string]struct{}{}
 	}
@@ -732,6 +980,7 @@ var (
 	runningStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	failedStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	errorBadgeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	disabledStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	// keycapStyle is the keyboard-key chip used in the footer and help overlay.
 	keycapStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("15")).
@@ -764,9 +1013,13 @@ func newModel(cfg Config) *model {
 	names := orderedNames(cfg)
 	for _, name := range names {
 		p := NewProcess(name, cfg.Processes[name], cfg.UI.MaxLogLines)
+		p.setLogLimits(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
 		p.detectErrors = cfg.UI.HighlightErrors
+		if reason := cfg.unavailable[name]; reason != "" {
+			p.Disable(reason)
+		}
 		m.processes = append(m.processes, p)
-		if m.selected == -1 && cfg.Processes[name].Autostart {
+		if m.selected == -1 && cfg.Processes[name].Autostart && p.Unavailable() == "" {
 			m.selected = len(m.processes) - 1
 		}
 	}
@@ -776,8 +1029,12 @@ func newModel(cfg Config) *model {
 	for _, name := range orderedTaskNames(cfg) {
 		tc := cfg.Tasks[name]
 		p := NewProcess(name, ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color}, cfg.UI.MaxLogLines)
+		p.setLogLimits(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
 		p.oneShot = true
 		p.detectErrors = cfg.UI.HighlightErrors
+		if reason := cfg.unavailable[name]; reason != "" {
+			p.Disable(reason)
+		}
 		m.processes = append(m.processes, p)
 	}
 
@@ -830,7 +1087,7 @@ func (m *model) waitRefresh() tea.Cmd {
 
 func (m *model) Init() tea.Cmd {
 	for _, p := range m.processes {
-		if p.Config.Autostart {
+		if p.Config.Autostart && p.Unavailable() == "" {
 			go func(proc *Process) { _ = proc.Start(m.notify) }(p)
 		}
 	}
@@ -1265,7 +1522,7 @@ func (m *model) processList() string {
 		processStatus := p.Status()
 		status := oneShotStatusLabel(p, processStatus)
 		errs := p.Errors()
-		if errs > 0 && processStatus != StatusFailed {
+		if errs > 0 && processStatus != StatusFailed && processStatus != StatusDisabled {
 			status += "!"
 		}
 		name := sanitizeLogLine(p.Name)
@@ -1301,6 +1558,10 @@ type processListLine struct {
 }
 
 func processStatusKind(status ProcessStatus, errs int) string {
+	// Disabled wins over a leftover error badge: the entry cannot run at all.
+	if status == StatusDisabled {
+		return "disabled"
+	}
 	if errs > 0 && status != StatusFailed {
 		return "error"
 	}
@@ -1351,6 +1612,8 @@ func formatProcessListLine(in processListLine) string {
 		statusRendered = runningStyle.Render(in.status)
 	case "failed":
 		statusRendered = failedStyle.Render(in.status)
+	case "disabled":
+		statusRendered = disabledStyle.Render(in.status)
 	}
 	return marker + dot + name + pad + " " + statusRendered
 }
@@ -1730,6 +1993,14 @@ func loadConfig(path string) (Config, error) {
 	if cfg.UI.MaxLogLines < 0 {
 		return Config{}, errors.New("ui.max_log_lines cannot be negative")
 	}
+	if cfg.UI.MaxLogBytes < 0 {
+		return Config{}, errors.New("ui.max_log_bytes cannot be negative")
+	}
+	// A budget below one line makes the cap meaningless (the newest line is
+	// always kept), so refuse it instead of pretending to honour it.
+	if cfg.UI.MaxLogBytes > 0 && int64(cfg.UI.MaxLogBytes) < minMaxLogBytes {
+		return Config{}, fmt.Errorf("ui.max_log_bytes must be at least %s", formatByteSize(minMaxLogBytes))
+	}
 	if cfg.UI.WebPort < 0 || cfg.UI.WebPort > 65535 {
 		return Config{}, errors.New("ui.web_port must be between 0 and 65535 (0 = default 52911)")
 	}
@@ -1738,6 +2009,7 @@ func loadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.unavailable = make(map[string]string)
 	for name, processCfg := range cfg.Processes {
 		if strings.TrimSpace(name) == "" {
 			return Config{}, errors.New("process name cannot be empty")
@@ -1772,12 +2044,11 @@ func loadConfig(path string) (Config, error) {
 			processCfg.Cwd = filepath.Join(configDir, processCfg.Cwd)
 		}
 		processCfg.Cwd = filepath.Clean(processCfg.Cwd)
-		info, err := os.Stat(processCfg.Cwd)
-		if err != nil {
-			return Config{}, fmt.Errorf("process %q cwd: %w", name, err)
-		}
-		if !info.IsDir() {
-			return Config{}, fmt.Errorf("process %q cwd %q is not a directory", name, processCfg.Cwd)
+		// A cwd that is missing (repo not cloned on this machine) disables
+		// this entry alone. Failing here would make one absent directory
+		// block every other process in the file.
+		if reason := cwdProblem(processCfg.Cwd); reason != "" {
+			cfg.unavailable[name] = reason
 		}
 		cfg.Processes[name] = processCfg
 	}
@@ -1803,12 +2074,8 @@ func loadConfig(path string) (Config, error) {
 			taskCfg.Cwd = filepath.Join(configDir, taskCfg.Cwd)
 		}
 		taskCfg.Cwd = filepath.Clean(taskCfg.Cwd)
-		info, err := os.Stat(taskCfg.Cwd)
-		if err != nil {
-			return Config{}, fmt.Errorf("task %q cwd: %w", name, err)
-		}
-		if !info.IsDir() {
-			return Config{}, fmt.Errorf("task %q cwd %q is not a directory", name, taskCfg.Cwd)
+		if reason := cwdProblem(taskCfg.Cwd); reason != "" {
+			cfg.unavailable[name] = reason
 		}
 		cfg.Tasks[name] = taskCfg
 	}
@@ -1828,6 +2095,43 @@ func loadConfig(path string) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// disabledNotice summarizes entries that loaded disabled, so a missing clone
+// is visible at startup instead of only when the user tries to start it.
+func disabledNotice(cfg Config) string {
+	if len(cfg.unavailable) == 0 {
+		return ""
+	}
+	// Iterate both orders without appending into the config's own slices:
+	// orderedNames returns cfg.processOrder itself when it is usable.
+	var names []string
+	for _, order := range [][]string{orderedNames(cfg), orderedTaskNames(cfg)} {
+		for _, name := range order {
+			if _, bad := cfg.unavailable[name]; bad {
+				names = append(names, name)
+			}
+		}
+	}
+	const maxNames = 4
+	shown := names
+	suffix := ""
+	if len(shown) > maxNames {
+		shown = shown[:maxNames]
+		suffix = fmt.Sprintf(", +%d", len(names)-maxNames)
+	}
+	return fmt.Sprintf("%d disabled (cwd unavailable): %s%s", len(names), strings.Join(shown, ", "), suffix)
+}
+
+// joinNotices concatenates the non-empty startup notices for the status line.
+func joinNotices(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " · ")
 }
 
 func main() {
@@ -1857,7 +2161,7 @@ func runSession(configPath string) int {
 	m.mode = "session"
 	// Another supervisor may already hold ports this config declares; free-port
 	// would terminate those listeners without this heads-up.
-	m.statusText = otherInstancesNotice(configPath, cfg)
+	m.statusText = joinNotices(otherInstancesNotice(configPath, cfg), disabledNotice(cfg))
 	control, err := startControlServer(m, configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "control plane error:", err)

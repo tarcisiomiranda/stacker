@@ -102,6 +102,13 @@ func runCLI(configPath string, explicit bool, args []string) int {
 			return 2
 		}
 		return cliFreePort(configPath, rest[0], jsonOut)
+	case "logs", "log":
+		return cliLogs(configPath, rest, jsonOut)
+	case "completion", "completions":
+		return cliCompletion(rest)
+	case "__complete":
+		// Hidden: the shell scripts call this. Undocumented in help on purpose.
+		return cliComplete(configPath, rest)
 	case "tasks":
 		name := ""
 		if len(rest) > 0 {
@@ -137,17 +144,28 @@ Commands:
   list                 List configured processes and their status
   instances, ins       List every running Stacker on this machine
   status [name]        Status of all processes, or one by name
+  logs <name>          Print a process log (see "Log flags" below)
+  logs --supervisor    Print the daemon's own log (works with no instance up)
   start <name>         Start a process (frees configured port first)
   stop <name>          Stop a process
   restart <name>       Stop then start a process
   free-port <port>     Kill whatever is listening on TCP port (no TUI required)
   tasks [name]         List one-shot tasks (all processes, or one by name)
   run <proc> <task>    Run a one-shot task in a process (output goes to its log)
+  completion <shell>   Print the completion script (bash, zsh, fish)
   version              Print the Stacker version (-v, --version)
 
 Flags:
   --config path, -config path   Path to stacker.yml (default: stacker.yml in cwd)
   --json                        Machine-readable JSON output (for AI agents)
+
+Log flags (stacker logs):
+  -n N, --tail N       Last N lines (default 200); --all for everything kept
+  --since IDX          Start at absolute log index IDX — pass the "next" from a
+                       previous --json run to get only what came after it
+  -f, --follow         Keep printing new lines until Ctrl+C (not for scripts)
+  --supervisor         The daemon's own log file instead of a process log
+  --json               {"lines": [...], "next": N, ...}; with -f, one per batch
 
 The --config path identifies the instance. serve, attach, list, start, down, …
 must all use the same path (default is ./stacker.yml relative to where you run the command).
@@ -161,11 +179,19 @@ Examples:
   stacker --config ./stacker.yml serve -d     # headless in background
   stacker --config ./stacker.yml a            # reattach TUI (short for attach)
   stacker --config ./stacker.yml list --json
+  stacker --config ./stacker.yml logs backend -n 50        # tail of one service
+  stacker --config ./stacker.yml logs backend --json       # lines + next index
+  stacker --config ./stacker.yml logs backend --since 1200 # only what is new
+  stacker --config ./stacker.yml logs --supervisor         # daemon's own log
   stacker --config ./stacker.yml restart backend
   stacker --config ./stacker.yml down
   stacker instances                           # what is running right now
   stacker free-port 8000                      # no instance required
   stacker --config ./stacker.yml run backend migrate
+  stacker completion                          # per-shell install instructions
+
+With completion installed, "stacker logs <TAB>" lists the live processes with
+their status, so you never have to remember a process name.
 `)
 }
 

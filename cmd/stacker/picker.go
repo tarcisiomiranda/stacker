@@ -19,6 +19,9 @@ const (
 	pickerCancel pickerAction = iota
 	pickerAttach
 	pickerStart
+	// pickerLogHints prints the log commands for the selected instance and
+	// exits, for when the answer wanted is a pipe, not a full-screen TUI.
+	pickerLogHints
 )
 
 // pickerEntry is one selectable row: either a live instance or the offer to
@@ -38,6 +41,9 @@ type pickerModel struct {
 
 	action pickerAction
 	chosen string
+	// chosenRow is the instance behind chosen, kept for actions that need more
+	// than its config path (log hints).
+	chosenRow instanceSummary
 
 	statusText    string
 	width, height int
@@ -119,6 +125,19 @@ func (m *pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.statusText = "no local stacker.yml to start"
 			return m, nil
+		case "l":
+			if m.selected < 0 || m.selected >= len(entries) {
+				return m, nil
+			}
+			entry := entries[m.selected]
+			if entry.start {
+				m.statusText = "nothing running for that config yet — start it first"
+				return m, nil
+			}
+			m.action = pickerLogHints
+			m.chosen = entry.config
+			m.chosenRow = *entry.summary
+			return m, tea.Quit
 		case "d":
 			if m.selected < 0 || m.selected >= len(entries) {
 				return m, nil
@@ -254,9 +273,15 @@ func (m *pickerModel) View() string {
 		b.WriteString("\n\n")
 	}
 
+	// Say where logs are: the TUI has them, but nothing on this screen used to
+	// hint at that, and a user who wants to pipe them needs the CLI form.
+	b.WriteString(pickerDimStyle.Render("enter opens the TUI with live logs · l prints log commands to pipe"))
+	b.WriteString("\n\n")
+
 	footer := []string{
 		keycap("↑↓") + " move",
 		keycap("enter") + " open",
+		keycap("l") + " logs",
 		keycap("n") + " start here",
 		keycap("d") + " stop",
 		keycap("r") + " refresh",
@@ -268,6 +293,7 @@ func (m *pickerModel) View() string {
 		footer = []string{
 			keycap("↑↓") + " move",
 			keycap("enter") + " open",
+			keycap("l") + " logs",
 			keycap("d") + " stop",
 			keycap("r") + " refresh",
 			keycap("q") + " quit",
@@ -312,6 +338,9 @@ func runPicker(configPath string, rows []instanceSummary) int {
 		return runAttach(m.chosen)
 	case pickerStart:
 		return runSession(m.chosen)
+	case pickerLogHints:
+		fmt.Print(formatLogHints(m.chosenRow))
+		return 0
 	default:
 		return 0
 	}

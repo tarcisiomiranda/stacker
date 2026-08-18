@@ -1,4 +1,4 @@
-last_updated: 2026-08-06
+last_updated: 2026-08-17
 
 domain: processes
 description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, instance disambiguation, and terminal UI.
@@ -12,6 +12,14 @@ models:
     path: cmd/stacker/main.go
   - name: TaskConfig
     path: cmd/stacker/main.go
+  - name: byteSize
+    path: cmd/stacker/main.go
+  - name: logsOptions
+    path: cmd/stacker/logs.go
+  - name: logsResponse
+    path: cmd/stacker/logs.go
+  - name: completionShells
+    path: cmd/stacker/completion.go
   - name: ProcessStatus
     path: cmd/stacker/main.go
   - name: Process
@@ -116,4 +124,6 @@ frontend:
       path: cmd/stacker/picker.go
     - name: Web log viewer (index + logs page)
       path: cmd/stacker/web.go
+    - name: Shell completion scripts (bash, zsh, fish)
+      path: cmd/stacker/completions
   types: []

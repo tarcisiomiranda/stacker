@@ -974,13 +974,6 @@ processes:
     command: true
     graceful_timeout: later
 `,
-		"missing working directory": `
-version: 1
-processes:
-  app:
-    command: true
-    cwd: ./missing
-`,
 		"invalid color": `
 version: 1
 processes:

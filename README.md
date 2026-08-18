@@ -13,7 +13,9 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **YAML-defined processes** — one entry per service; graceful start, stop, and restart.
 - **Automatic port freeing** — an optional `port:` is cleared before every start/restart, killing the whole supervisor tree (`npm → node`, `mise → uvicorn`) so restarts don't fail with "address already in use". Works on Linux, macOS, and Windows.
 - **Split log capture** — separate stdout/stderr, scrollable, with a configurable per-process memory cap.
-- **CLI control plane** — `list`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
+- **CLI control plane** — `list`/`logs`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
+- **Logs over a pipe** — `stacker logs <name>` tails a process without a TUI, with `--since` for incremental reads and `--supervisor` for the daemon's own log.
+- **Shell completion** — bash, zsh and fish; `stacker logs <TAB>` lists the live processes with their status, so finding a log needs no memory.
 - **Serve + attach** — `stacker serve -d` runs headless in the background; `stacker attach` (or plain `stacker`) opens the TUI; `q` detaches without killing services; `stacker down` shuts everything down.
 - **Instance picker** — with several projects supervised at once, a bare `stacker` lists what is running (label, config path, ports, port collisions) and lets you pick, start the local config, or stop one. An explicit `--config` is always honoured and never swapped for another instance.
 - **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
@@ -87,14 +89,15 @@ version: 1
 ui:
   wheel_lines: 3          # lines scrolled per mouse-wheel notch
   copy_on_release: true   # copy the selection when the mouse button is released
-  max_log_lines: 10000    # per-process log memory cap
+  max_log_lines: 10000    # per-process log line cap
+  max_log_bytes: 256MB    # per-process log memory cap
   word_wrap: false        # initial wrap state (toggle at runtime with W / web checkbox)
   highlight_errors: false # opt-in orange badge on error-looking output
 
 processes:
   backend:
     command: mise run back:dev
-    cwd: .                 # resolved relative to this file; must exist
+    cwd: .                 # relative to this file; missing → this entry is disabled
     autostart: false       # registered but not started until Enter/CLI
     graceful_timeout: 8s   # SIGTERM grace before SIGKILL
     port: 8000             # freed before every start/restart
@@ -113,7 +116,7 @@ tasks:
     command: pg_dump app > backup.sql
 ```
 
-Unknown YAML fields, empty commands, missing directories, invalid timeouts/ports/colors, and duplicate names are rejected before the TUI opens. Each command inherits the environment (including `PATH`) from the user who started Stacker and runs through `/bin/sh -c`; if `mise` already works in your terminal, `command: mise run task-name` works with no extra setup.
+Unknown YAML fields, empty commands, invalid timeouts/ports/colors, and duplicate names are rejected before the TUI opens. A missing `cwd` is the exception: it disables that one entry (see below) instead of blocking the whole file. Each command inherits the environment (including `PATH`) from the user who started Stacker and runs through `/bin/sh -c`; if `mise` already works in your terminal, `command: mise run task-name` works with no extra setup.
 
 ### `ui` fields
 
@@ -121,7 +124,8 @@ Unknown YAML fields, empty commands, missing directories, invalid timeouts/ports
 |-------|------|---------|---------|
 | `wheel_lines` | int ≥ 0 | `3` | Lines scrolled per mouse-wheel notch. |
 | `copy_on_release` | bool | `false` | Copy the selection through OSC 52 when the mouse button is released. |
-| `max_log_lines` | int ≥ 0 | `10000` | Per-process in-memory log cap. |
+| `max_log_lines` | int ≥ 0 | `10000` | Per-process retained log lines. |
+| `max_log_bytes` | size ≥ 4KB | `256MB` | Per-process log memory budget: `256MB`, `512kb`, or a byte count. Both caps apply; the tighter one trims. |
 | `word_wrap` | bool | `false` | Initial log wrap state; toggle at runtime (`W`, or the web `wrap` box). |
 | `highlight_errors` | bool | `false` | Match each line against error patterns and badge the process. |
 
@@ -132,7 +136,7 @@ Each key under `processes:` is a service name (non-empty, unique). **Key order i
 | Field | Required | Meaning |
 |-------|----------|---------|
 | `command` | yes | Shell command run with `/bin/sh -c`. Prefer a project task like `mise run back:dev`. |
-| `cwd` | no | Working directory, relative to the config file. Must exist. Defaults to `.`. |
+| `cwd` | no | Working directory, relative to the config file. Defaults to `.`. Missing on this machine → the entry loads `disabled` (see below). |
 | `autostart` | no | Start when Stacker opens. Defaults to `false`. |
 | `graceful_timeout` | no | Go duration (`500ms`, `8s`, `1m30s`) to wait after SIGTERM before SIGKILL. Defaults to `8s`. |
 | `port` | no | TCP port (1–65535) freed before every start/restart. |
@@ -149,6 +153,7 @@ otherwise type in a second terminal:
 
 ### Runtime behavior worth knowing
 
+- **Missing `cwd` disables one entry, not the file.** A `stacker.yml` shared across a team usually lists more repos than any single machine has cloned. Entries whose `cwd` is absent load with status `disabled` (dimmed, with the reason as the first log line) and are inert: no autostart, no free-port, and `start` fails with the reason instead of a bind error. Starting one re-checks the directory, so after `git clone` you just press start — no restart of Stacker, and a YAML edit re-evaluates it too. If the directory disappears while the service is up, the service keeps running and is only marked disabled once stopped.
 - **Free-port** targets the listener's whole process group, so supervisor trees (`npm → node`, `mise → uvicorn`) go down together instead of respawning the server; it retries a few rounds before reporting the port as still busy.
 - **Color** changes (TUI `c`, web selector) and **order** changes (TUI `Shift+↑/↓`, web drag) are written back to `stacker.yml`, preserving comments and formatting — so the file is not static while Stacker runs.
 - **Error highlighting** (`highlight_errors: true`) matches every captured line against built-in patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match the status turns orange with a `!` badge and the log title shows the count, even while running. Restart or a mark (`space`) clears it. It's one regex per line and only runs when enabled. The web `error badge` checkbox toggles it and persists the choice.
@@ -217,6 +222,12 @@ stacker down                    # stop all processes and shut down the superviso
 stacker ping                    # exit 0 if an instance runs for this config
 stacker list --json             # process names, status, ports
 stacker status backend --json   # one process
+stacker logs backend            # last 200 lines of that process
+stacker logs backend -n 20 -f   # tail and follow (Ctrl+C to stop)
+stacker logs backend --json     # lines + "next" index to resume from
+stacker logs backend --since 90 # only what was logged after index 90
+stacker logs --supervisor       # the daemon's own log, even if it died
+stacker completion zsh          # completion script for bash, zsh or fish
 stacker start backend
 stacker stop backend
 stacker restart backend
@@ -228,6 +239,34 @@ stacker version                 # -v / --version also work
 ```
 
 Only one Stacker instance is allowed per absolute config path; the control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir).
+
+### Shell completion
+
+```bash
+stacker completion            # per-shell install instructions
+stacker completion zsh > "${fpath[1]}/_stacker"
+stacker completion fish > ~/.config/fish/completions/stacker.fish
+stacker completion bash > ~/.local/share/bash-completion/completions/stacker
+```
+
+`mise run build:install` writes all three for the shells it finds, into the
+directories they already load — no edit to your rc files.
+
+Completion is dynamic: candidates come from the running supervisor, so
+
+```
+$ stacker logs <TAB>
+mfe-back    -- running · :3001
+tc-back     -- disabled · cwd unavailable
+tools-worker -- stopped · :3060
+```
+
+zsh and fish show the status next to each name; bash lists the names. It also
+completes commands, the flags of the command you are on, `--config` paths, and
+`stacker run <process> <TAB>` for that process's tasks. With no supervisor
+running it completes nothing and stays silent rather than erroring.
+
+**Where the logs are.** Process output is kept in the supervisor's memory (bounded by `ui.max_log_lines` and `ui.max_log_bytes`), never written to disk. Three ways to read it: the TUI, the web viewer (`w`), and `stacker logs` — the only one that works over a pipe, in a script, or from an AI agent. Each `--json` reply carries a `next` index, so `--since <next>` returns only what was added since the last read; that is the incremental pattern to prefer over `-f`, which never returns. `stacker logs --supervisor` is different: it reads the daemon's own log **file**, so it answers even when the supervisor failed to start, and holds supervisor notices rather than process output. A bare `stacker` with no TTY prints the running instances plus the exact log command for each.
 
 **Session vs serve:** `stacker` (no subcommand) is session mode — the TUI owns the process; `q` stops everything. `stacker serve` is headless; processes keep running until `stacker down` or SIGTERM. `stacker attach` (or plain `stacker` while serve is up) opens a TUI that **detaches** on `q` without killing services.
 
@@ -319,10 +358,15 @@ mise install          # pin Go and other tools
 mise run dev          # run against ./stacker.yml (demo process autostarts)
 mise run build        # build ./bin/stacker
 mise run test         # go test ./...
+mise run build:install # build for this machine and install it into PATH
 mise run install      # go install into $GOBIN or $(go env GOPATH)/bin
 ```
 
 The bundled `stacker.yml` has a self-contained `demo` process so you can try log handling without configuring a project.
+
+**Testing your working tree.** `mise run build:install` (`scripts/install_local.py`) reads `go env` for the real target, builds with the release flags, and **replaces the `stacker` that PATH already resolves** — installing anywhere else would leave `stacker` running the old build. It writes a sibling file and renames it into place, so a supervisor currently executing that binary is undisturbed instead of failing with "text file busy". The version stamp carries `-dirty` while the tree has uncommitted changes, which is how you tell a test build from a release. Options: `--dry-run`, `--dir <path>`, `--skip-build`, or `STACKER_INSTALL_DIR`.
+
+Replacing the binary does not restart anything: supervisors already running keep the previous build until `stacker --config <cfg> down` and a fresh start. The installer lists them for you. To go back to a release, re-run `install.sh`.
 
 ## Releases
 

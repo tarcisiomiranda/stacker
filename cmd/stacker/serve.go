@@ -28,6 +28,9 @@ func runServe(configPath string, background, withWeb bool) int {
 	if notice := otherInstancesNotice(configPath, cfg); notice != "" {
 		fmt.Fprintln(os.Stderr, "notice:", notice)
 	}
+	if notice := disabledNotice(cfg); notice != "" {
+		fmt.Fprintln(os.Stderr, "notice:", notice)
+	}
 	control, err := startControlServer(m, configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "control plane error:", err)
@@ -40,7 +43,7 @@ func runServe(configPath string, background, withWeb bool) int {
 
 	// Autostart processes (same as TUI Init).
 	for _, p := range m.processes {
-		if p.Config.Autostart {
+		if p.Config.Autostart && p.Unavailable() == "" {
 			go func(proc *Process) { _ = proc.Start(m.notify) }(p)
 		}
 	}
@@ -137,19 +140,12 @@ func orDefault(s, def string) string {
 	return s
 }
 
-// tailFile returns the last n lines of path (best-effort).
+// tailFile returns the last n lines of path as text (best-effort). It shares
+// the windowed reader with `stacker logs --supervisor`.
 func tailFile(path string, n int) string {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	lines, err := tailFileLines(path, n)
+	if err != nil || len(lines) == 0 {
 		return ""
-	}
-	lines := strings.Split(string(data), "\n")
-	// Drop trailing empty from final newline.
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
