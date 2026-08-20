@@ -102,6 +102,10 @@ install_agent_skills() {
 		".continue"
 	install_skill_for_agent "$skill_path" ".codeium/windsurf/skills/stacker" \
 		".codeium/windsurf" ".windsurf" "bin:windsurf"
+	install_skill_for_agent "$skill_path" ".kiro/skills/stacker" \
+		".kiro" "bin:kiro"
+	install_skill_for_agent "$skill_path" ".hermes/skills/stacker" \
+		".hermes" "bin:hermes"
 
 	printf 'Agent skill install finished.\n'
 }

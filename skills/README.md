@@ -57,6 +57,9 @@ then copies `skills/stacker/SKILL.md` only where those tools live.
 | **OpenCode (compat)** | also reads `.claude/skills` and `.agents/skills` | same under `~/` |
 | **Cursor** | `.cursor/skills/stacker/SKILL.md` | `~/.cursor/skills/stacker/SKILL.md` |
 | **Grok** | `.grok/skills/stacker/SKILL.md` | `~/.grok/skills/stacker/SKILL.md` |
+| **Kiro** | `.kiro/skills/stacker/SKILL.md` | `~/.kiro/skills/stacker/SKILL.md` |
+| **Hermes Agent** | `.hermes/skills/stacker/SKILL.md` | `~/.hermes/skills/stacker/SKILL.md` |
+| **BMAD** | `_bmad/custom/skills/stacker/SKILL.md` (only if `_bmad/` exists) | — |
 | **Generic / multi-agent** | `.agents/skills/stacker/SKILL.md` | `~/.agents/skills/stacker/SKILL.md` |
 
 ## When agents should load this skill

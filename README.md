@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/instal
 
 The installer detects the operating system and architecture, downloads the latest release, and verifies its SHA-256 checksum. When run as `root`, it installs Stacker in `/usr/local/bin`. For other users, it falls back to `~/.local/bin` when `/usr/local/bin` is not writable.
 
-**Agent skills are off by default.** To also detect AI tools on the machine (Claude Code, Codex, OpenCode, Cursor, Grok, …) and install the Stacker `SKILL.md` for them:
+**Agent skills are off by default.** To also detect AI tools on the machine (Claude Code, Codex, OpenCode, Cursor, Grok, Kiro, Hermes, …) and install the Stacker `SKILL.md` for them:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/install.sh \
@@ -322,7 +322,7 @@ Agents should:
 2. if running, `restart` / `start` / `stop` / `run` via the CLI;
 3. never start the same service with `mise run …` or `go run …` in parallel.
 
-## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, …)
+## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, Kiro, Hermes, BMAD, …)
 
 Stacker ships an [Agent Skills](https://agentskills.io/specification)-compatible skill so coding agents use the CLI instead of starting services in parallel.
 
@@ -347,6 +347,9 @@ python scripts/install_skills.py --dry-run
 | OpenCode | `.opencode/skills/stacker/` | `~/.config/opencode/skills/stacker/` |
 | Cursor | `.cursor/skills/stacker/` | `~/.cursor/skills/stacker/` |
 | Grok | `.grok/skills/stacker/` | `~/.grok/skills/stacker/` |
+| Kiro | `.kiro/skills/stacker/` | `~/.kiro/skills/stacker/` |
+| Hermes Agent | `.hermes/skills/stacker/` | `~/.hermes/skills/stacker/` |
+| BMAD | `_bmad/custom/skills/stacker/` (if `_bmad/` exists) | — |
 | Generic | `.agents/skills/stacker/` | `~/.agents/skills/stacker/` |
 
 See `skills/README.md` for details. `AGENTS.md` is the canonical YAML contract for agents editing `stacker.yml`.

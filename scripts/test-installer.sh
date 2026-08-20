@@ -112,7 +112,7 @@ fi
 
 # With STACKER_INSTALL_SKILLS=1 and a fake agent home
 fake_home="${TEMPORARY_DIRECTORY}/home"
-mkdir -p "${fake_home}/.claude"
+mkdir -p "${fake_home}/.claude" "${fake_home}/.kiro" "${fake_home}/.hermes"
 install_directory_skills="${TEMPORARY_DIRECTORY}/install-skills"
 mkdir -p "$install_directory_skills"
 STACKER_TEST_RELEASE_DIRECTORY="$release_directory" \
@@ -124,15 +124,21 @@ STACKER_TEST_RELEASE_DIRECTORY="$release_directory" \
 	PATH="${mock_directory}:${PATH}" \
 	/bin/sh "${PROJECT_ROOT}/install.sh"
 
-skill_dest="${fake_home}/.claude/skills/stacker/SKILL.md"
-if [ ! -f "$skill_dest" ]; then
-	printf 'STACKER_INSTALL_SKILLS=1 did not install skill to %s\n' "$skill_dest" >&2
-	exit 1
-fi
-if ! grep -q 'name: stacker' "$skill_dest"; then
-	printf 'Installed skill content looks wrong\n' >&2
-	exit 1
-fi
+for dest_rel in \
+	".claude/skills/stacker/SKILL.md" \
+	".kiro/skills/stacker/SKILL.md" \
+	".hermes/skills/stacker/SKILL.md"
+do
+	skill_dest="${fake_home}/${dest_rel}"
+	if [ ! -f "$skill_dest" ]; then
+		printf 'STACKER_INSTALL_SKILLS=1 did not install skill to %s\n' "$skill_dest" >&2
+		exit 1
+	fi
+	if ! grep -q 'name: stacker' "$skill_dest"; then
+		printf 'Installed skill content looks wrong at %s\n' "$skill_dest" >&2
+		exit 1
+	fi
+done
 
 # Explicitly off: no skill even if agent home exists
 fake_home_off="${TEMPORARY_DIRECTORY}/home-off"
