@@ -15,6 +15,9 @@ processes:
     graceful_timeout: 8s
     color: "#38bdf8"
     # port: 8000   # free this port before start/restart (kills external holders)
+    tasks:
+      install: mise run setup
+      build: mise run build
 
   frontend:
     command: mise run front
@@ -23,6 +26,9 @@ processes:
     graceful_timeout: 8s
     color: "#a78bfa"
     # port: 3000
+    tasks:
+      install: mise run setup
+      build: mise run build
 
   demo:
     command: 'i=1; while true; do echo "demo log $i - $(date +%T)"; i=$((i+1)); sleep 1; done'
@@ -31,6 +37,8 @@ processes:
     graceful_timeout: 3s
     color: "#34d399"
     tasks:  # per-process one-shot: TUI `t`, web More ▾ → Tasks, or `stacker run demo <task>`
+      install: mise run setup
+      build: mise run build
       date: date
       list-files: ls -la
 

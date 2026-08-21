@@ -1240,6 +1240,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.showTasks = true
 				}
 			}
+		case "i":
+			m.runNamedTask("install")
+		case "b":
+			m.runNamedTask("build")
 		case "?":
 			m.showHelp = true
 		case "pgup":
@@ -1347,15 +1351,27 @@ func keycap(key string) string {
 
 // footerView is the always-visible primary-action bar.
 func (m *model) footerView() string {
-	// Compact chips for the four fixed process actions + help/quit.
+	// Compact chips for the fixed process actions + help/quit. The task chips
+	// only appear when the selected process actually has tasks configured, so
+	// the footer never teaches a key that would open an empty picker.
 	parts := []string{
 		keycap("s") + " stop",
 		keycap("r") + " restart",
 		keycap("f") + " free port",
 		keycap("w") + " web",
-		keycap("?") + " help",
-		keycap("q") + " quit",
 	}
+	if p := m.current(); p != nil {
+		if len(p.Config.Tasks) > 0 {
+			parts = append(parts, keycap("t")+" tasks")
+		}
+		if _, ok := p.Config.Tasks["install"]; ok {
+			parts = append(parts, keycap("i")+" install")
+		}
+		if _, ok := p.Config.Tasks["build"]; ok {
+			parts = append(parts, keycap("b")+" build")
+		}
+	}
+	parts = append(parts, keycap("?")+" help", keycap("q")+" quit")
 	return strings.Join(parts, mutedStyle.Render(" · "))
 }
 
@@ -1382,6 +1398,8 @@ func (m *model) helpView() string {
 				{"shift+↑/↓", "move process (saved to YAML)"},
 				{"enter", "start (▶ tasks: run once)"},
 				{"t", "run a task (one-shot command)"},
+				{"i", "run install task (if configured)"},
+				{"b", "run build task (if configured)"},
 				{"c", "cycle color (saved to YAML)"},
 			},
 		},
@@ -1514,6 +1532,31 @@ func (m *model) handleTaskKey(key string) tea.Cmd {
 	return nil
 }
 
+// runNamedTask launches a fixed task name on the selected process from a
+// hotkey (i=install, b=build). Absent task and already-running produce a
+// footer status only, no picker overlay.
+func (m *model) runNamedTask(name string) {
+	p := m.current()
+	if p == nil {
+		return
+	}
+	if _, ok := p.Config.Tasks[name]; !ok {
+		m.statusText = fmt.Sprintf("No %q task on %s", name, p.Name)
+		return
+	}
+	if p.TaskRunning(name) {
+		m.statusText = fmt.Sprintf("Task %s already running on %s", name, p.Name)
+		return
+	}
+	m.statusText = "Running task " + name
+	go func() {
+		if err := p.RunTask(name, m.notify); err != nil {
+			p.appendLog("[stacker] " + err.Error())
+			m.notify()
+		}
+	}()
+}
+
 func (m *model) processList() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Processes"))
@@ -1535,6 +1578,7 @@ func (m *model) processList() string {
 			statusKind:   processStatusKind(processStatus, errs),
 			color:        p.Color(),
 			oneShot:      p.oneShot,
+			hasTasks:     len(p.Config.Tasks) > 0,
 			selected:     i == m.selected,
 			contentWidth: max(1, m.leftWidth()-5),
 		})
@@ -1553,6 +1597,7 @@ type processListLine struct {
 	statusKind   string // "", "running", "failed", "error"
 	color        string
 	oneShot      bool
+	hasTasks     bool
 	selected     bool
 	contentWidth int
 }
@@ -1591,12 +1636,25 @@ func formatProcessListLine(in processListLine) string {
 	}
 	nameWidth := max(1, in.contentWidth-len(in.status)-1-dotWidth-markerWidth)
 	name := truncate(in.name, nameWidth)
-	pad := strings.Repeat(" ", max(0, nameWidth-ansi.StringWidth(name)))
+	padLen := max(0, nameWidth-ansi.StringWidth(name))
+	// Task indicator ⋯ sits in the trailing pad, right before the status.
+	// Skipped when the name eats the pad — the row is already at the limit.
+	showTaskMarker := in.hasTasks && padLen >= 2
+	if showTaskMarker {
+		padLen -= 2
+	}
+	pad := strings.Repeat(" ", padLen)
+	tailPlain := ""
+	tailRendered := ""
+	if showTaskMarker {
+		tailPlain = " ⋯"
+		tailRendered = " " + mutedStyle.Render("⋯")
+	}
 	plain := marker
 	if in.color != "" {
 		plain += "● "
 	}
-	plain += name + pad + " " + in.status
+	plain += name + pad + tailPlain + " " + in.status
 	if in.selected {
 		return selectedProcessStyle.Render(plain)
 	}
@@ -1615,7 +1673,7 @@ func formatProcessListLine(in processListLine) string {
 	case "disabled":
 		statusRendered = disabledStyle.Render(in.status)
 	}
-	return marker + dot + name + pad + " " + statusRendered
+	return marker + dot + name + pad + tailRendered + " " + statusRendered
 }
 
 // oneShotStatusLabel maps a stopped one-shot to "idle" so a finished run does

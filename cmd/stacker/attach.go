@@ -477,6 +477,7 @@ func (m *attachModel) processList() string {
 			statusKind:   kind,
 			color:        p.Color,
 			oneShot:      p.OneShot,
+			hasTasks:     len(p.Tasks) > 0,
 			selected:     i == m.selected,
 			contentWidth: max(1, m.leftWidth()-5),
 		})
