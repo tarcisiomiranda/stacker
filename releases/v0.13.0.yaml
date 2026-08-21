@@ -1,0 +1,24 @@
+# Hand-written release notes for v0.13.0.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.13.0
+
+highlights: |
+  Install and build tasks get their own keys: `i` runs a process's `install`
+  task and `b` runs its `build` task, without going through the picker. The
+  process list shows a `⋯` next to any process that has tasks configured, and
+  the footer grows `t tasks`, `i install`, `b build` chips only when the
+  selected process actually has those tasks — so no key ever teaches an empty
+  action. The skill installer also learned Kiro, Hermes and BMAD, so
+  `mise run skills:install` covers three more agents.
+
+features:
+  - "**`i` / `b` hotkeys** — run the selected process's `install` / `build` task straight from the list; missing task or already-running produces a footer status, never opens an empty picker"
+  - "**`⋯` task indicator** — sits in the process list next to any process with `tasks:` configured, muted so it does not compete with the color dot"
+  - "**Contextual footer chips** — `t tasks` when the selected process has any task, plus `i install` / `b build` only when those specific tasks exist"
+  - "**Help overlay entries** — `?` documents the new `i` and `b` shortcuts under Process"
+  - "**Skill installer learns Kiro, Hermes and BMAD** — `mise run skills:install` and `install.sh` detect and provision the three extra agents alongside the existing ones"
+
+changes:
+  - "Attach TUI inherits the `⋯` marker for free — same `formatProcessListLine` renders it from `ProcessInfo.Tasks`"
+  - "`scripts/install_skills.py` gained unit coverage for the new agent paths (`scripts/test_install_skills.py`)"
