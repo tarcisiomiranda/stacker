@@ -78,6 +78,118 @@ processes:
 	}
 }
 
+func TestApplyConfigDiffPreservesGroupedProcessSelection(t *testing.T) {
+	m := groupedModel()
+	m.selected = 5
+
+	cfg := Config{
+		Processes: map[string]ProcessConfig{
+			"cache":  {Command: "true", Group: "infra"},
+			"api":    {Command: "true", Group: "core"},
+			"worker": {Command: "true", Group: "core"},
+			"db":     {Command: "true", Group: "data"},
+		},
+		processOrder: []string{"cache", "api", "worker", "db"},
+	}
+	m.applyConfigDiff(cfg)
+
+	if current := m.current(); current == nil || current.Name != "db" {
+		t.Fatalf("expected db to remain selected after config reload, got %#v", current)
+	}
+	if m.selected != 6 {
+		t.Fatalf("expected db restored to visible row 6, got %d", m.selected)
+	}
+}
+
+func TestApplyConfigDiffFallsBackToFirstServiceWhenSelectionDisappears(t *testing.T) {
+	m := groupedModel()
+	m.selected = 5
+
+	cfg := Config{
+		Processes: map[string]ProcessConfig{
+			"cache":  {Command: "true", Group: "infra"},
+			"api":    {Command: "true", Group: "core"},
+			"worker": {Command: "true", Group: "core"},
+		},
+		processOrder: []string{"cache", "api", "worker"},
+	}
+	m.applyConfigDiff(cfg)
+
+	if current := m.current(); current == nil || current.Name != "cache" {
+		t.Fatalf("expected first service cache selected after db removal, got %#v", current)
+	}
+	if m.selected != 1 {
+		t.Fatalf("expected cache restored to visible row 1, got %d", m.selected)
+	}
+}
+
+func TestApplyConfigDiffPreservesSelectedSectionHeader(t *testing.T) {
+	m := groupedModel()
+	m.selected = 0
+
+	cfg := Config{
+		Processes: map[string]ProcessConfig{
+			"cache":  {Command: "true", Group: "infra"},
+			"api":    {Command: "true", Group: "core"},
+			"worker": {Command: "true", Group: "core"},
+			"db":     {Command: "true", Group: "data"},
+		},
+		processOrder: []string{"cache", "api", "worker", "db"},
+		Tasks: map[string]TaskConfig{
+			"migrate": {Command: "true", Group: "core"},
+		},
+		taskOrder: []string{"migrate"},
+	}
+	m.applyConfigDiff(cfg)
+	m.width = 100
+	m.height = 20
+
+	if m.selected != 2 || m.current() != nil || !strings.Contains(m.logView(), "Section: core") {
+		t.Fatalf("expected core header restored at row 2, selected=%d current=%#v log=%q", m.selected, m.current(), m.logView())
+	}
+}
+
+func TestApplyConfigDiffPrunePreservesGroupedProcessSelection(t *testing.T) {
+	m := groupedModel()
+	m.selected = 5
+	m.processByName("worker").orphaned = true
+
+	m.pruneOrphans()
+
+	if current := m.current(); current == nil || current.Name != "db" {
+		t.Fatalf("expected db to remain selected after pruning, got %#v", current)
+	}
+	if m.selected != 4 {
+		t.Fatalf("expected db restored to visible row 4, got %d", m.selected)
+	}
+}
+
+func TestReorderPreservesGroupedProcessSelection(t *testing.T) {
+	m := groupedModel()
+	m.selected = 5
+	m.requestOrder([]string{"db", "api", "worker"})
+	m.applyPendingOrder()
+
+	if current := m.current(); current == nil || current.Name != "db" {
+		t.Fatalf("expected db to remain selected after pending reorder, got %#v", current)
+	}
+	if m.selected != 1 {
+		t.Fatalf("expected db restored to visible row 1, got %d", m.selected)
+	}
+}
+
+func TestReorderPreservesSelectedSectionHeader(t *testing.T) {
+	m := groupedModel()
+	m.selected = 0
+	m.requestOrder([]string{"db", "api", "worker"})
+	m.applyPendingOrder()
+
+	section := m.selectedSection()
+	if m.selected != 2 || section == nil || section.Name != "core" {
+		t.Fatalf("expected core header restored at row 2, selected=%d section=%#v", m.selected, section)
+	}
+}
+
 func TestApplyConfigDiffOrphanRunning(t *testing.T) {
 	dir := t.TempDir()
 	path := writeConfig(t, dir, `

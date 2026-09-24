@@ -10,6 +10,7 @@ ui:
 processes:
   backend:
     command: mise run back
+    group: application
     cwd: .
     autostart: false
     graceful_timeout: 8s
@@ -21,6 +22,7 @@ processes:
 
   frontend:
     command: mise run front
+    group: application
     cwd: .
     autostart: false
     graceful_timeout: 8s
@@ -47,6 +49,8 @@ processes:
 tasks:
   disk-usage:
     command: df -h
+    group: operations
   list-here:
     command: ls -la
+    group: operations
     cwd: .

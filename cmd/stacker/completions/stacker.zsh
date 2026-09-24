@@ -43,7 +43,7 @@ _stacker() {
 				(( index++ ))
 				;;
 			--config=*) _stacker_config=${word#--config=} ;;
-			-n|--tail|--lines|--since) (( index++ )) ;;
+			-n|--tail|--lines|--since|--group|-g) (( index++ )) ;;
 			-*) ;;
 			*) positional+=("$word") ;;
 		esac
@@ -58,6 +58,11 @@ _stacker() {
 			return
 			;;
 		-n|--tail|--lines|--since)
+			return
+			;;
+		--group|-g)
+			_stacker_candidates groups
+			_describe -t groups 'process group' candidates
 			return
 			;;
 	esac

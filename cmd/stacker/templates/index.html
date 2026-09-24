@@ -15,6 +15,84 @@ body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
   <h1 class="font-bold text-base mb-1">Stacker{{if .ConfigLabel}} <span class="text-neutral-400 font-normal">· {{.ConfigLabel}}</span>{{end}}</h1>
   {{if .OtherInstances}}<p class="text-amber-500 text-xs mb-1">{{.OtherInstances}} other instance(s) running</p>{{end}}
   <p class="text-neutral-500 mb-6 break-all">{{.Config}}</p>
+  {{if .Grouped}}
+  <nav class="flex flex-col border border-neutral-800 divide-y divide-neutral-800">
+    {{range .Sections}}
+    <section data-sidebar-section data-group-section="{{.Name}}" data-group-value="{{.GroupValue}}">
+      <div class="flex items-center justify-between gap-2 px-3 py-2 bg-neutral-900">
+        <button data-group-fold aria-expanded="true" class="min-w-0 flex flex-1 items-center gap-2 text-left cursor-pointer">
+          <span class="h-px flex-1 bg-neutral-700"></span><span data-fold-icon>−</span><span class="min-w-0 truncate">{{.Name}}</span><span class="h-px flex-1 bg-neutral-700"></span>
+          {{if .Total}}
+          <span data-group-summary class="text-xs {{if eq .State "running"}}text-green-400{{else if eq .State "failed"}}text-red-400{{else if eq .State "error"}}text-amber-400{{else}}text-neutral-500{{end}}">{{.Running}}/{{.Total}}</span>
+          {{end}}
+        </button>
+        <div class="flex shrink-0 gap-1">
+          <button data-group-action="start" data-group-value="{{.GroupValue}}" title="Start all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">▶</button>
+          <button data-group-action="stop" data-group-value="{{.GroupValue}}" title="Stop all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">■</button>
+          <button data-group-action="restart" data-group-value="{{.GroupValue}}" title="Restart all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">↻</button>
+        </div>
+      </div>
+      <div data-section-members class="flex flex-col divide-y divide-neutral-800">
+        {{range .Services}}
+        <a data-group-member="{{.Name}}" href="/logs/{{.NameEscaped}}" class="flex items-center justify-between gap-2 px-4 py-2 hover:bg-neutral-800">
+          <span class="truncate flex items-center gap-1.5">{{if .Color}}<span class="inline-block size-2 rounded-full shrink-0" style="background: {{.Color}}"></span>{{end}}{{.Name}}</span>
+          <span class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
+        </a>
+        {{end}}
+        {{range .Tasks}}
+        <a data-group-member="{{.Name}}" href="/logs/{{.NameEscaped}}" class="flex items-center justify-between gap-2 px-4 py-2 hover:bg-neutral-800">
+          <span class="truncate flex items-center gap-1.5"><span class="text-neutral-500 shrink-0">▶</span>{{if .Color}}<span class="inline-block size-2 rounded-full shrink-0" style="background: {{.Color}}"></span>{{end}}{{.Name}}</span>
+          <span class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
+        </a>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+  </nav>
+  <p id="msg" class="min-h-5 mt-2 text-xs text-neutral-400" aria-live="polite"></p>
+  <script>
+  const foldStorageKey = "stacker:folded:" + {{.Config}};
+  let foldedGroups = new Set();
+  try {
+    foldedGroups = new Set(JSON.parse(localStorage.getItem(foldStorageKey) || "[]"));
+  } catch {}
+  function setSectionFold(section, folded) {
+    section.querySelector("[data-section-members]").classList.toggle("hidden", folded);
+    const toggle = section.querySelector("[data-group-fold]");
+    toggle.setAttribute("aria-expanded", String(!folded));
+    toggle.querySelector("[data-fold-icon]").textContent = folded ? "+" : "−";
+    if (folded) foldedGroups.add(section.dataset.groupSection);
+    else foldedGroups.delete(section.dataset.groupSection);
+    try {
+      localStorage.setItem(foldStorageKey, JSON.stringify([...foldedGroups]));
+    } catch {}
+  }
+  document.querySelectorAll("[data-sidebar-section]").forEach((section) => {
+    setSectionFold(section, foldedGroups.has(section.dataset.groupSection));
+    section.querySelector("[data-group-fold]").addEventListener("click", () => {
+      setSectionFold(section, !section.querySelector("[data-section-members]").classList.contains("hidden"));
+    });
+  });
+  document.querySelectorAll("[data-group-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/groups/" + button.dataset.groupAction, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group: button.dataset.groupValue }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        document.getElementById("msg").textContent = `${button.dataset.groupAction} all sent for ${data.group}`;
+      } catch (error) {
+        document.getElementById("msg").textContent = `${button.dataset.groupAction} all failed: ${error.message}`;
+      }
+      button.disabled = false;
+    });
+  });
+  </script>
+  {{else}}
   <nav class="flex flex-col border border-neutral-800 divide-y divide-neutral-800">
     {{range .Processes}}
     <a href="/logs/{{.NameEscaped}}"
@@ -35,6 +113,7 @@ body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
     </a>
     {{end}}
   </nav>
+  {{end}}
   {{end}}
 </div>
 </body>

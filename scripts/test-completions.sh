@@ -37,10 +37,15 @@ processes:
   api:
     command: sh -c 'while :; do sleep 1; done'
     port: 59123
+    group: hub
     tasks:
       migrate: "true"
   worker:
     command: "true"
+    group: Other
+  frontend:
+    command: "true"
+    group: "Frontend Services"
 YML
 
 export XDG_RUNTIME_DIR="${workdir}/run"
@@ -96,6 +101,54 @@ if command -v bash >/dev/null 2>&1; then
 	else
 		pass "bash: descriptions stripped"
 	fi
+	for option in --group -g; do
+		bash_groups=$(
+			PATH="${repo_root}/bin:$PATH" bash -c '
+				source "$1"
+				COMP_WORDS=(stacker --config "$2" start "$3" "")
+				COMP_CWORD=5
+				_stacker_complete
+				printf "%s\n" "${COMPREPLY[@]}"
+			' _ "${completions}/stacker.bash" "$config" "$option"
+		)
+		if grep -qx 'hub' <<<"$bash_groups" && grep -qx 'Other' <<<"$bash_groups"; then
+			pass "bash: ${option} completes effective groups"
+		else
+			fail "bash: ${option} group completion returned '${bash_groups}'"
+		fi
+	done
+	for option in --group -g; do
+		bash_space_group=$(
+			PATH="${repo_root}/bin:$PATH" bash -c '
+				source "$1"
+				COMP_WORDS=(stacker --config "$2" start "$3" Front)
+				COMP_CWORD=5
+				_stacker_complete
+				printf "%s\n" "${COMPREPLY[@]}"
+			' _ "${completions}/stacker.bash" "$config" "$option"
+		)
+		if [ "$bash_space_group" = 'Frontend Services' ]; then
+			pass "bash: ${option} preserves spaces in group candidates"
+		else
+			fail "bash: ${option} group prefix returned '${bash_space_group}', want one 'Frontend Services' candidate"
+		fi
+	done
+	for option in --group -g; do
+		bash_processes=$(
+			PATH="${repo_root}/bin:$PATH" bash -c '
+				source "$1"
+				COMP_WORDS=(stacker --config "$2" start "$3" hub "")
+				COMP_CWORD=6
+				_stacker_complete
+				printf "%s\n" "${COMPREPLY[@]}"
+			' _ "${completions}/stacker.bash" "$config" "$option"
+		)
+		if grep -qx 'api' <<<"$bash_processes" && grep -qx 'worker' <<<"$bash_processes"; then
+			pass "bash: ${option} value is consumed before process completion"
+		else
+			fail "bash: process completion after ${option} returned '${bash_processes}'"
+		fi
+	done
 
 	bash_cmds=$(
 		PATH="${repo_root}/bin:$PATH" bash -c '
@@ -125,6 +178,30 @@ if command -v fish >/dev/null 2>&1; then
 	else
 		fail "fish: logs completion returned '${fish_out}'"
 	fi
+	for option in --group -g; do
+		fish_groups=$(fish -c "
+			set -gx PATH ${repo_root}/bin \$PATH
+			source ${completions}/stacker.fish
+			complete -C 'stacker --config ${config} start ${option} '
+		")
+		if grep -q '^hub\t' <<<"$fish_groups" && grep -q '^Other\t' <<<"$fish_groups"; then
+			pass "fish: ${option} completes effective groups"
+		else
+			fail "fish: ${option} group completion returned '${fish_groups}'"
+		fi
+	done
+	for option in --group -g; do
+		fish_processes=$(fish -c "
+			set -gx PATH ${repo_root}/bin \$PATH
+			source ${completions}/stacker.fish
+			complete -C 'stacker --config ${config} start ${option} hub '
+		")
+		if grep -q '^api\t' <<<"$fish_processes" && grep -q '^worker\t' <<<"$fish_processes"; then
+			pass "fish: ${option} value is consumed before process completion"
+		else
+			fail "fish: process completion after ${option} returned '${fish_processes}'"
+		fi
+	done
 
 	fish_cmds=$(fish -c "
 		set -gx PATH ${repo_root}/bin \$PATH

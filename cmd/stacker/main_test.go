@@ -3,13 +3,61 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
+
+func TestProcessOrphanedAccessor(t *testing.T) {
+	process := NewProcess("test", ProcessConfig{}, 10)
+	process.mu.Lock()
+	process.orphaned = true
+	process.mu.Unlock()
+	if !process.Orphaned() {
+		t.Fatal("orphaned accessor did not return true")
+	}
+	process.mu.Lock()
+	process.orphaned = false
+	process.mu.Unlock()
+	if process.Orphaned() {
+		t.Fatal("orphaned accessor did not return false")
+	}
+
+	const iterations = 100_000
+	start := make(chan struct{})
+	ready := make(chan struct{}, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		ready <- struct{}{}
+		<-start
+		for index := 0; index < iterations; index++ {
+			process.mu.Lock()
+			process.orphaned = index%2 == 0
+			process.mu.Unlock()
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		ready <- struct{}{}
+		<-start
+		for index := 0; index < iterations; index++ {
+			process.Orphaned()
+		}
+	}()
+	<-ready
+	<-ready
+	close(start)
+	workers.Wait()
+}
 
 func TestProcessKeepsOnlyConfiguredNumberOfLogs(t *testing.T) {
 	p := NewProcess("test", ProcessConfig{}, 2)
@@ -34,10 +82,349 @@ func TestNewModelSelectsFirstAutostartProcess(t *testing.T) {
 	}
 }
 
+func TestNewModelSelectsGroupedAutostartProcessByRow(t *testing.T) {
+	m := groupedModel()
+	if m.selected != 1 {
+		t.Fatalf("expected selected row 1 for api after its section header, got %d", m.selected)
+	}
+	if current := m.current(); current == nil || current.Name != "api" {
+		t.Fatalf("expected api to be selected, got %#v", current)
+	}
+}
+
+func TestNewModelInitializesCollapsedSections(t *testing.T) {
+	if groupedModel().collapsed == nil {
+		t.Fatal("expected collapsed state to be initialized")
+	}
+}
+
+func TestNewModelMembersNormalizeGroupsAndPreserveIndexes(t *testing.T) {
+	m := newModel(Config{
+		Processes: map[string]ProcessConfig{
+			"api":    {Command: "true", Group: " core "},
+			"worker": {Command: "true", Group: "jobs"},
+		},
+		processOrder: []string{"api", "worker"},
+		Tasks: map[string]TaskConfig{
+			"deploy": {Command: "true", Group: " core "},
+		},
+		taskOrder: []string{"deploy"},
+	})
+	members := m.members()
+	if len(members) != 3 {
+		t.Fatalf("expected three members, got %#v", members)
+	}
+	if members[0].Name != "api" || members[0].Group != "core" || members[0].Index != 0 {
+		t.Fatalf("unexpected first service member: %#v", members[0])
+	}
+	if members[1].Name != "worker" || members[1].Group != "jobs" || members[1].Index != 1 {
+		t.Fatalf("unexpected second service member: %#v", members[1])
+	}
+	if members[2].Name != "deploy" || members[2].Group != "core" || !members[2].OneShot || members[2].Index != 2 {
+		t.Fatalf("unexpected one-shot member: %#v", members[2])
+	}
+}
+
+func TestNewModelUngroupedProcessListKeepsOneRowPerProcess(t *testing.T) {
+	m := newModel(Config{Processes: map[string]ProcessConfig{
+		"api":    {Command: "true"},
+		"worker": {Command: "true"},
+	}})
+	lines := strings.Split(m.processList(), "\n")
+	if len(lines) != len(m.processes)+1 {
+		t.Fatalf("expected one list row per ungrouped process plus title, got %d lines for %d processes", len(lines), len(m.processes))
+	}
+}
+
+func TestProcessListNavigationSelectsSectionHeadersAndMembers(t *testing.T) {
+	m := groupedModel()
+	m.selected = 1
+
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.selected != 0 || m.current() != nil {
+		t.Fatalf("expected up to select the core header row, selected=%d current=%#v", m.selected, m.current())
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if current := m.current(); current == nil || current.Name != "api" {
+		t.Fatalf("expected down to select api, got %#v", current)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if current := m.current(); current == nil || current.Name != "worker" {
+		t.Fatalf("expected down to select worker, got %#v", current)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if current := m.current(); current == nil || current.Name != "migrate" {
+		t.Fatalf("expected down to select migrate, got %#v", current)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.current() != nil {
+		t.Fatalf("expected down to select a section header, got %#v", m.current())
+	}
+}
+
+func TestProcessListNavigationSkipsMembersInCollapsedSections(t *testing.T) {
+	m := groupedModel()
+	m.collapsed["core"] = true
+	m.selected = 0
+
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.selected != 1 || m.current() != nil {
+		t.Fatalf("expected down to move from collapsed core to data header row, selected=%d current=%#v", m.selected, m.current())
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if current := m.current(); current == nil || current.Name != "db" {
+		t.Fatalf("expected down to move from data header to db, got %#v", current)
+	}
+}
+
+func TestProcessListRendersSectionHeaderRows(t *testing.T) {
+	m := groupedModel()
+	lines := strings.Split(m.processList(), "\n")
+	if len(lines) != 7 {
+		t.Fatalf("expected title plus six section rows, got %d lines: %q", len(lines), lines)
+	}
+	if got := ansi.Strip(strings.Join(lines, "\n")); !strings.Contains(got, "core") || !strings.Contains(got, "data") {
+		t.Fatalf("expected group headers in process list, got %q", got)
+	}
+}
+
+func TestSectionHeaderRendersDividerFoldMarkerServiceCountAndTaskErrorBadge(t *testing.T) {
+	m := groupedModel()
+	m.width = 100
+	m.processes[0].status = StatusRunning
+	m.processes[1].status = StatusStopped
+	m.processes[3].status = StatusFailed
+	m.processes[3].errCount = 1
+
+	contentWidth := max(1, m.leftWidth()-5)
+	line := ansi.Strip(strings.Split(m.processList(), "\n")[1])
+	if !strings.Contains(line, "− core") || !strings.Contains(line, "core ─") || strings.Contains(line, "▾") || !strings.HasSuffix(line, " 1/2!") {
+		t.Fatalf("expected expanded core header with service count and task error badge, got %q", line)
+	}
+	if width := ansi.StringWidth(line); width != contentWidth {
+		t.Fatalf("expanded section header width = %d, want %d: %q", width, contentWidth, line)
+	}
+
+	m.collapsed["core"] = true
+	line = ansi.Strip(strings.Split(m.processList(), "\n")[1])
+	if !strings.Contains(line, "+ core") || !strings.Contains(line, "core ─") || strings.Contains(line, "▸") || !strings.HasSuffix(line, " 1/2!") {
+		t.Fatalf("expected collapsed core header with service count and task error badge, got %q", line)
+	}
+	if width := ansi.StringWidth(line); width != contentWidth {
+		t.Fatalf("collapsed section header width = %d, want %d: %q", width, contentWidth, line)
+	}
+}
+
+func TestSectionHeaderTruncatesWithinAvailableWidth(t *testing.T) {
+	const width = 16
+	line := formatSectionHeader("a-very-long-group-name", sectionSummary{
+		Running: 1,
+		Total:   2,
+		State:   "error",
+	}, false, false, width)
+	plain := ansi.Strip(line)
+	if got := ansi.StringWidth(plain); got != width {
+		t.Fatalf("section header width = %d, want %d: %q", got, width, plain)
+	}
+	if !strings.Contains(plain, "−") || !strings.Contains(plain, " ─ ") || !strings.HasSuffix(plain, " 1/2!") {
+		t.Fatalf("narrow section header lost visible divider spacing or its count: %q", plain)
+	}
+}
+
+func TestSectionHeaderOmitsCountForTaskOnlySection(t *testing.T) {
+	m := newModel(Config{Tasks: map[string]TaskConfig{
+		"publish": {Command: "true", Group: "release"},
+	}})
+	m.width = 100
+
+	line := ansi.Strip(strings.Split(m.processList(), "\n")[1])
+	if !strings.Contains(line, "− release") || strings.Contains(line, "▾") || strings.Contains(line, "/") {
+		t.Fatalf("expected task-only header without a count, got %q", line)
+	}
+}
+
+func TestSectionHeaderSelectionUsesSelectedRowTreatment(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+
+	m := groupedModel()
+	m.width = 100
+	m.selected = 0
+
+	line := strings.Split(m.processList(), "\n")[1]
+	plain := ansi.Strip(line)
+	if plain == line {
+		t.Fatal("expected selected header styling to render reverse-video control codes")
+	}
+	if line != selectedProcessStyle.Render(plain) {
+		t.Fatalf("selected header did not use selected-row reverse treatment\ngot  %q\nwant %q", line, selectedProcessStyle.Render(plain))
+	}
+}
+
+func TestProcessListShowsTaskMarkerInGroupedRow(t *testing.T) {
+	m := newModel(Config{Processes: map[string]ProcessConfig{
+		"api": {
+			Command: "true",
+			Group:   "application",
+			Tasks:   map[string]string{"lint": "true"},
+		},
+	}})
+	m.width = 100
+
+	for _, line := range strings.Split(m.processList(), "\n") {
+		plain := ansi.Strip(line)
+		if strings.Contains(plain, "api") {
+			if !strings.Contains(plain, "⋯") {
+				t.Fatalf("grouped service with tasks lacks task marker: %q", plain)
+			}
+			return
+		}
+	}
+	t.Fatal("grouped api row not found")
+}
+
+func TestSectionHeaderUsesTaskFailureAndErrorState(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+
+	m := groupedModel()
+	m.width = 100
+	task := m.processes[3]
+	task.status = StatusFailed
+
+	line := strings.Split(m.processList(), "\n")[1]
+	plain := ansi.Strip(line)
+	if strings.Contains(plain, "!") || line != failedStyle.Render(plain) {
+		t.Fatalf("expected failed task to render a red header without an error badge, got %q", line)
+	}
+
+	task.errCount = 1
+	line = strings.Split(m.processList(), "\n")[1]
+	plain = ansi.Strip(line)
+	if !strings.Contains(plain, "!") || line != errorBadgeStyle.Render(plain) {
+		t.Fatalf("expected task error lines to render an orange header with an error badge, got %q", line)
+	}
+}
+
+func TestSectionHeaderFoldKeysCollapseMemberAndExpandHeader(t *testing.T) {
+	m := groupedModel()
+	m.selected = 1
+
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if !m.collapsed["core"] || m.selected != 0 || m.selectedSection() == nil {
+		t.Fatalf("expected left to collapse core and select its header, collapsed=%v selected=%d section=%#v", m.collapsed, m.selected, m.selectedSection())
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.collapsed["core"] || m.selected != 0 {
+		t.Fatalf("expected l to expand selected core header, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+
+	m.selected = 1
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	if !m.collapsed["core"] || m.selected != 0 {
+		t.Fatalf("expected h to collapse core from its member and select its header, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.collapsed["core"] || m.selected != 0 {
+		t.Fatalf("expected right to expand selected core header, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+}
+
+func TestMouseProcessListTogglesHeaderAndSelectsMembers(t *testing.T) {
+	m := groupedModel()
+	m.width = 100
+
+	m.handleMouse(tea.MouseMsg{X: 1, Y: 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if !m.collapsed["core"] || m.selected != 0 || m.selectedSection() == nil {
+		t.Fatalf("expected header click to collapse and keep core selected, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+	m.handleMouse(tea.MouseMsg{X: 1, Y: 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.collapsed["core"] || m.selected != 0 {
+		t.Fatalf("expected second header click to expand and keep core selected, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+	m.handleMouse(tea.MouseMsg{X: 1, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if current := m.current(); current == nil || current.Name != "api" {
+		t.Fatalf("expected click on api row to select api, got %#v", current)
+	}
+}
+
+func TestMouseProcessListClampsClickToVisibleRows(t *testing.T) {
+	m := groupedModel()
+	m.width = 100
+
+	m.handleMouse(tea.MouseMsg{X: 1, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if !m.collapsed["core"] || m.selected != 0 {
+		t.Fatalf("expected click above the rows to clamp to and toggle the first header, collapsed=%v selected=%d", m.collapsed, m.selected)
+	}
+
+	m = groupedModel()
+	m.width = 100
+	m.handleMouse(tea.MouseMsg{X: 1, Y: 100, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if current := m.current(); current == nil || current.Name != "db" {
+		t.Fatalf("expected click below the rows to clamp to the last member, got %#v at row %d", current, m.selected)
+	}
+}
+
+func TestHelpDocumentsSectionFoldingActionsGroupPickerAndReordering(t *testing.T) {
+	got := ansi.Strip(groupedModel().helpView())
+	for _, text := range []string{"Sections", "←/h", "→/l", "g", "↑/k", "↓/j", "enter", "1–9", "0", "on a header", "whole section", "within its section"} {
+		if !strings.Contains(got, text) {
+			t.Fatalf("help is missing %q: %q", text, got)
+		}
+	}
+}
+
+func TestProcessListHeaderShowsSectionSummaryInLogPanel(t *testing.T) {
+	m := groupedModel()
+	m.width = 100
+	m.height = 20
+	m.selected = 0
+
+	got := m.logView()
+	if !strings.Contains(got, "Section: core") || !strings.Contains(got, "2 services") || !strings.Contains(got, "1 task") {
+		t.Fatalf("expected selected section summary, got %q", got)
+	}
+}
+
+func TestMoveSelectedGroupedProcessUsesMemberIndex(t *testing.T) {
+	m := groupedModel()
+	m.selected = 1
+
+	if cmd := m.moveSelectedCmd(1); cmd == nil {
+		t.Fatal("expected selected api to be reorderable")
+	}
+	if current := m.current(); current == nil || current.Name != "api" {
+		t.Fatalf("expected moved api to remain selected, got %#v", current)
+	}
+	if m.selected != 2 {
+		t.Fatalf("expected api selected at its new visible row 2, got %d", m.selected)
+	}
+}
+
+func groupedModel() *model {
+	return newModel(Config{
+		Processes: map[string]ProcessConfig{
+			"api":    {Command: "true", Group: "core", Autostart: true},
+			"worker": {Command: "true", Group: "core"},
+			"db":     {Command: "true", Group: "data"},
+		},
+		processOrder: []string{"api", "worker", "db"},
+		Tasks: map[string]TaskConfig{
+			"migrate": {Command: "true", Group: "core"},
+		},
+		taskOrder: []string{"migrate"},
+	})
+}
+
 func TestProcessListRowsFitPanel(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{
-		"backend-with-a-long-name": {Command: "true"},
-		"demo":                     {Command: "true", Autostart: true},
+		"backend-with-a-long-name": {Command: "true", Group: "infrastructure-group-with-a-very-long-name"},
+		"demo":                     {Command: "true", Autostart: true, Group: "infrastructure-group-with-a-very-long-name"},
 	}})
 	m.width = 80
 
@@ -257,6 +644,166 @@ processes:
 	}
 }
 
+func TestUpdateConfigFieldGroupPreservesComments(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+# process mapping note
+processes:
+  # api member note
+  api:
+    command: echo api
+    group: old # api group note
+  # worker member note
+  worker:
+    command: echo worker
+# task mapping note
+tasks:
+  # deploy task note
+  deploy:
+    command: echo deploy
+    group: old # deploy group note
+  # backup task note
+  backup:
+    command: echo backup
+`)
+
+	value := `release: # [blue], {canary} "east"`
+	for _, target := range []struct {
+		mapping string
+		name    string
+	}{
+		{mapping: "processes", name: "api"},
+		{mapping: "processes", name: "worker"},
+		{mapping: "tasks", name: "deploy"},
+		{mapping: "tasks", name: "backup"},
+	} {
+		if err := updateConfigField(path, target.mapping, target.name, "group", value); err != nil {
+			t.Fatalf("set %s group on %s: %v", target.name, target.mapping, err)
+		}
+	}
+
+	if err := updateConfigField(path, "processes", "api", "group", "release: # [green], {stable} 'west'"); err != nil {
+		t.Fatalf("replace process group: %v", err)
+	}
+	if err := updateConfigField(path, "tasks", "deploy", "group", "release: # [green], {stable} 'west'"); err != nil {
+		t.Fatalf("replace task group: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	text := string(data)
+	for _, comment := range []string{
+		"# process mapping note",
+		"# api member note",
+		"# api group note",
+		"# worker member note",
+		"# task mapping note",
+		"# deploy task note",
+		"# deploy group note",
+		"# backup task note",
+	} {
+		if !strings.Contains(text, comment) {
+			t.Fatalf("expected comment %q to survive field updates:\n%s", comment, text)
+		}
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("rewritten config must still load: %v", err)
+	}
+	if got := cfg.Processes["api"].Group; got != "release: # [green], {stable} 'west'" {
+		t.Fatalf("unexpected replaced process group %q", got)
+	}
+	if got := cfg.Processes["worker"].Group; got != value {
+		t.Fatalf("unexpected inserted process group %q", got)
+	}
+	if got := cfg.Tasks["deploy"].Group; got != "release: # [green], {stable} 'west'" {
+		t.Fatalf("unexpected replaced task group %q", got)
+	}
+	if got := cfg.Tasks["backup"].Group; got != value {
+		t.Fatalf("unexpected inserted task group %q", got)
+	}
+
+	for _, target := range []struct {
+		mapping string
+		name    string
+	}{
+		{mapping: "processes", name: "api"},
+		{mapping: "processes", name: "worker"},
+		{mapping: "tasks", name: "deploy"},
+		{mapping: "tasks", name: "backup"},
+	} {
+		if err := updateConfigField(path, target.mapping, target.name, "group", ""); err != nil {
+			t.Fatalf("remove %s group from %s: %v", target.name, target.mapping, err)
+		}
+	}
+
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatalf("config after removing groups must still load: %v", err)
+	}
+	for _, got := range []string{
+		cfg.Processes["api"].Group,
+		cfg.Processes["worker"].Group,
+		cfg.Tasks["deploy"].Group,
+		cfg.Tasks["backup"].Group,
+	} {
+		if got != "" {
+			t.Fatalf("expected all groups removed, got %q", got)
+		}
+	}
+}
+
+func TestUpdateConfigFieldFlowEntryFallbackPreservesComments(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+# process mapping note
+processes:
+  # api member note
+  api: {command: echo api, group: old}
+# task mapping note
+tasks:
+  # deploy task note
+  deploy: {command: echo deploy, group: old}
+`)
+	value := `release: # [blue], {canary} "east"`
+	for _, target := range []struct {
+		mapping string
+		name    string
+	}{
+		{mapping: "processes", name: "api"},
+		{mapping: "tasks", name: "deploy"},
+	} {
+		if err := updateConfigField(path, target.mapping, target.name, "group", value); err != nil {
+			t.Fatalf("update %s group on %s: %v", target.name, target.mapping, err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	text := string(data)
+	for _, comment := range []string{"# process mapping note", "# api member note", "# task mapping note", "# deploy task note"} {
+		if !strings.Contains(text, comment) {
+			t.Fatalf("expected comment %q to survive fallback encoding:\n%s", comment, text)
+		}
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("fallback-encoded config must still load: %v", err)
+	}
+	if got := cfg.Processes["api"].Group; got != value {
+		t.Fatalf("unexpected process group after fallback encoding %q", got)
+	}
+	if got := cfg.Tasks["deploy"].Group; got != value {
+		t.Fatalf("unexpected task group after fallback encoding %q", got)
+	}
+}
+
 func TestLoadConfigAcceptsWordWrap(t *testing.T) {
 	path := writeConfig(t, t.TempDir(), `
 version: 1
@@ -325,7 +872,7 @@ processes:
     command: echo demo
 `)
 
-	if err := updateConfigOrder(path, []string{"demo", "api", "web"}); err != nil {
+	if err := updateConfigOrder(path, "processes", []string{"demo", "api", "web"}); err != nil {
 		t.Fatalf("update order: %v", err)
 	}
 
@@ -377,8 +924,74 @@ processes:
 		{"api", "api"},
 		{"api", "missing"},
 	} {
-		if err := updateConfigOrder(path, names); err == nil {
+		if err := updateConfigOrder(path, "processes", names); err == nil {
 			t.Fatalf("expected rejection for %v", names)
+		}
+	}
+}
+
+func TestUpdateConfigOrderReordersTasksWithComments(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+tasks:
+  # backup task
+  backup: {command: echo backup}
+  # deploy task
+  deploy: {command: echo deploy}
+`)
+
+	if err := updateConfigOrder(path, "tasks", []string{"deploy", "backup"}); err != nil {
+		t.Fatalf("update task order: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	text := string(data)
+	deployAt := strings.Index(text, "deploy:")
+	backupAt := strings.Index(text, "backup:")
+	if !(deployAt < backupAt) {
+		t.Fatalf("expected deploy < backup in file:\n%s", text)
+	}
+	if !strings.Contains(text, "# deploy task\n  deploy:") || !strings.Contains(text, "# backup task\n  backup:") {
+		t.Fatalf("task comments did not move with their blocks:\n%s", text)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("reordered config must still load: %v", err)
+	}
+	want := []string{"deploy", "backup"}
+	for i, name := range want {
+		if cfg.taskOrder[i] != name {
+			t.Fatalf("expected task order %v, got %v", want, cfg.taskOrder)
+		}
+	}
+}
+
+func TestUpdateConfigOrderRejectsBadTaskPermutation(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+tasks:
+  backup:
+    command: echo backup
+  deploy:
+    command: echo deploy
+`)
+	for _, names := range [][]string{
+		{"backup"},
+		{"backup", "backup"},
+		{"backup", "missing"},
+	} {
+		if err := updateConfigOrder(path, "tasks", names); err == nil {
+			t.Fatalf("expected task mapping rejection for %v", names)
 		}
 	}
 }
@@ -655,11 +1268,20 @@ version: 1
 processes:
   api:
     command: echo ok
+    group: core
   web:
     command: echo ok
+    group: core
+  worker:
+    command: echo ok
+    group: jobs
 tasks:
   deploy:
     command: echo deploy
+    group: release
+  backup:
+    command: echo backup
+    group: release
 `)
 	cfg, err := loadConfig(path)
 	if err != nil {
@@ -668,62 +1290,307 @@ tasks:
 	m := newModel(cfg)
 	m.configPath = path
 
-	// Selecting the one-shot and moving it is refused.
-	m.selected = 2
-	if cmd := m.moveSelectedCmd(-1); cmd != nil {
-		t.Fatal("expected moving a one-shot to be refused")
-	}
-	if m.processes[2].Name != "deploy" {
-		t.Fatalf("one-shot must stay pinned, got %q", m.processes[2].Name)
-	}
-
-	// Moving a real process persists only the process order (no task name).
-	m.selected = 0
-	cmd := m.moveSelectedCmd(1)
-	if cmd == nil {
-		t.Fatal("expected a save command")
-	}
-	if msg, ok := cmd().(orderSavedMsg); !ok || msg.err != nil {
-		t.Fatalf("order save failed: %#v", msg)
+	m.selectByName("deploy")
+	if cmd := m.moveSelectedCmd(1); cmd == nil {
+		t.Fatal("expected moving a task within its section to be allowed")
+	} else if msg, ok := cmd().(orderSavedMsg); !ok || msg.err != nil {
+		t.Fatalf("task order save failed: %#v", msg)
 	}
 	cfg2, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("reordered config must load: %v", err)
 	}
-	if len(cfg2.processOrder) != 2 || cfg2.processOrder[0] != "web" || cfg2.processOrder[1] != "api" {
-		t.Fatalf("expected processes reordered to [web api], got %v", cfg2.processOrder)
+	if got := cfg2.taskOrder; len(got) != 2 || got[0] != "backup" || got[1] != "deploy" {
+		t.Fatalf("expected tasks reordered to [backup deploy], got %v", got)
 	}
-	if len(cfg2.Tasks) != 1 || cfg2.Tasks["deploy"].Command == "" {
-		t.Fatalf("standalone task must survive process reorder, got %#v", cfg2.Tasks)
+
+	m.selectByName("worker")
+	cmd := m.moveSelectedCmd(1)
+	if cmd != nil {
+		t.Fatal("expected a service at its section edge not to move into the next section")
 	}
-	if m.processes[len(m.processes)-1].Name != "deploy" {
-		t.Fatal("one-shot must remain last after reorder")
+
+	m.selectByName("api")
+	cmd = m.moveSelectedCmd(-1)
+	if cmd != nil {
+		t.Fatal("expected a service at its section edge not to move above its section")
+	}
+	cmd = m.moveSelectedCmd(1)
+	if cmd == nil {
+		t.Fatal("expected moving a service within its section to be allowed")
+	}
+	if msg, ok := cmd().(orderSavedMsg); !ok || msg.err != nil {
+		t.Fatalf("order save failed: %#v", msg)
+	}
+	cfg2, err = loadConfig(path)
+	if err != nil {
+		t.Fatalf("reordered config must load: %v", err)
+	}
+	if len(cfg2.processOrder) != 3 || cfg2.processOrder[0] != "web" || cfg2.processOrder[1] != "api" || cfg2.processOrder[2] != "worker" {
+		t.Fatalf("expected processes reordered to [web api worker], got %v", cfg2.processOrder)
+	}
+	if current := m.current(); current == nil || current.Name != "api" {
+		t.Fatalf("expected selection to stay on api after reorder, got %#v", current)
+	}
+	if m.processes[0].Name != "web" || m.processes[1].Name != "api" || m.processes[2].Name != "worker" || m.processes[3].Name != "backup" || m.processes[4].Name != "deploy" {
+		t.Fatalf("expected storage order to match configured services and tasks, got %v", processNames(m))
 	}
 }
 
-func TestWebPendingOrderKeepsTasksPinned(t *testing.T) {
+func TestReorderMovesWholeSectionAndKeepsOtherLast(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    group: core
+  worker:
+    command: echo ok
+    group: jobs
+  misc:
+    command: echo ok
+    group: Other
+tasks:
+  release:
+    command: echo ok
+    group: release
+  migrate:
+    command: echo ok
+    group: core
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(cfg)
+	m.configPath = path
+	if !m.selectHeader("core") {
+		t.Fatal("expected core header")
+	}
+	cmd := m.moveSelectedCmd(1)
+	if cmd == nil {
+		t.Fatal("expected service-bearing section move")
+	}
+	if msg := cmd().(orderSavedMsg); msg.err != nil {
+		t.Fatalf("section order save failed: %v", msg.err)
+	}
+	wantSections := []string{"jobs", "core", "release", "Other"}
+	gotSections := make([]string, 0, len(m.sections()))
+	for _, current := range m.sections() {
+		gotSections = append(gotSections, current.Name)
+	}
+	if !reflect.DeepEqual(gotSections, wantSections) {
+		t.Fatalf("expected section order %v, got %v", wantSections, gotSections)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.processOrder, []string{"worker", "api", "misc"}) {
+		t.Fatalf("expected full process order [worker api misc], got %v", cfg.processOrder)
+	}
+	if !reflect.DeepEqual(cfg.taskOrder, []string{"migrate", "release"}) {
+		t.Fatalf("expected section-scoped task order [migrate release], got %v", cfg.taskOrder)
+	}
+	if !m.selectHeader("Other") {
+		t.Fatal("expected Other header")
+	}
+	if cmd := m.moveSelectedCmd(-1); cmd != nil {
+		t.Fatal("expected Other section movement to be refused")
+	}
+	if got := m.sections()[len(m.sections())-1].Name; got != "Other" {
+		t.Fatalf("expected Other to remain last, got %q", got)
+	}
+}
+
+func TestReorderRefusesTaskOnlySectionAboveServices(t *testing.T) {
+	m := newModel(Config{
+		Processes:    map[string]ProcessConfig{"api": {Command: "echo ok", Group: "core"}},
+		processOrder: []string{"api"},
+		Tasks: map[string]TaskConfig{
+			"deploy":  {Command: "echo ok", Group: "release"},
+			"publish": {Command: "echo ok", Group: "docs"},
+		},
+		taskOrder: []string{"deploy", "publish"},
+	})
+	if !m.selectHeader("release") {
+		t.Fatal("expected release header")
+	}
+	if cmd := m.moveSelectedCmd(-1); cmd != nil {
+		t.Fatal("expected task-only section not to move above a service-bearing section")
+	}
+	if got, want := m.statusText, "Section can't cross service/task tiers"; got != want {
+		t.Fatalf("expected refusal status %q, got %q", want, got)
+	}
+}
+
+func TestReorderMovesTaskOnlySectionWithinTier(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    group: core
+tasks:
+  deploy:
+    command: echo ok
+    group: release
+  publish:
+    command: echo ok
+    group: docs
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(cfg)
+	m.configPath = path
+	if !m.selectHeader("release") {
+		t.Fatal("expected release header")
+	}
+	cmd := m.moveSelectedCmd(1)
+	if cmd == nil {
+		t.Fatal("expected adjacent task-only section move")
+	}
+	if msg := cmd().(orderSavedMsg); msg.err != nil {
+		t.Fatalf("task-only section order save failed: %v", msg.err)
+	}
+	gotSections := make([]string, 0, len(m.sections()))
+	for _, current := range m.sections() {
+		gotSections = append(gotSections, current.Name)
+	}
+	if !reflect.DeepEqual(gotSections, []string{"core", "docs", "release"}) {
+		t.Fatalf("expected task-only section order [core docs release], got %v", gotSections)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.taskOrder, []string{"publish", "deploy"}) {
+		t.Fatalf("expected task order [publish deploy], got %v", cfg.taskOrder)
+	}
+}
+
+func TestReorderRefusesOrphanMembersAndPreservesOrphanStorageOrder(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    group: core
+  web:
+    command: echo ok
+    group: core
+tasks:
+  deploy:
+    command: echo ok
+    group: release
+  cleanup:
+    command: echo ok
+    group: release
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(cfg)
+	m.configPath = path
+	orphanServiceA := NewProcess("orphan-service-a", ProcessConfig{Command: "echo a", Group: "core"}, 100)
+	orphanServiceA.orphaned = true
+	orphanServiceB := NewProcess("orphan-service-b", ProcessConfig{Command: "echo b", Group: "core"}, 100)
+	orphanServiceB.orphaned = true
+	orphanTaskA := NewProcess("orphan-task-a", ProcessConfig{Command: "echo a", Group: "release"}, 100)
+	orphanTaskA.oneShot = true
+	orphanTaskA.orphaned = true
+	orphanTaskB := NewProcess("orphan-task-b", ProcessConfig{Command: "echo b", Group: "release"}, 100)
+	orphanTaskB.oneShot = true
+	orphanTaskB.orphaned = true
+	m.processes = []*Process{m.processByName("api"), m.processByName("web"), orphanServiceA, orphanServiceB, m.processByName("deploy"), m.processByName("cleanup"), orphanTaskA, orphanTaskB}
+	m.numProcesses = 2
+	if !m.selectByName("orphan-service-a") {
+		t.Fatal("expected orphan member")
+	}
+	if cmd := m.moveSelectedCmd(1); cmd != nil {
+		t.Fatal("expected orphan member movement to be refused")
+	}
+	m.selectByName("api")
+	cmd := m.moveSelectedCmd(1)
+	if cmd == nil {
+		t.Fatal("expected configured service movement")
+	}
+	if msg := cmd().(orderSavedMsg); msg.err != nil {
+		t.Fatalf("service reorder failed: %v", msg.err)
+	}
+	want := []string{"web", "api", "orphan-service-a", "orphan-service-b", "deploy", "cleanup", "orphan-task-a", "orphan-task-b"}
+	if got := processNames(m); !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected four storage segments and orphan order %v, got %v", want, got)
+	}
+}
+
+func TestWebPendingOrderAcceptsMixedNamesAndPreservesOmittedTasks(t *testing.T) {
 	m := newModel(Config{
 		Processes: map[string]ProcessConfig{
-			"api": {Command: "echo ok"},
-			"web": {Command: "echo ok"},
+			"api":    {Command: "echo ok", Group: "core"},
+			"web":    {Command: "echo ok", Group: "core"},
+			"worker": {Command: "echo ok", Group: "jobs"},
 		},
-		processOrder: []string{"api", "web"},
-		Tasks:        map[string]TaskConfig{"deploy": {Command: "echo ok"}},
-		taskOrder:    []string{"deploy"},
+		processOrder: []string{"api", "web", "worker"},
+		Tasks: map[string]TaskConfig{
+			"deploy": {Command: "echo ok", Group: "release"},
+			"backup": {Command: "echo ok", Group: "release"},
+		},
+		taskOrder: []string{"deploy", "backup"},
 	})
-	// Web sends only the service names.
-	m.requestOrder([]string{"web", "api"})
+	m.requestOrder([]string{"worker", "backup", "web", "deploy", "api"})
 	m.applyPendingOrder()
-
-	got := make([]string, len(m.processes))
-	for i, p := range m.processes {
-		got[i] = p.Name
+	if got := processNames(m); !reflect.DeepEqual(got, []string{"worker", "web", "api", "backup", "deploy"}) {
+		t.Fatalf("expected mixed order applied within four storage segments, got %v", got)
 	}
-	want := []string{"web", "api", "deploy"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("expected order %v, got %v", want, got)
-		}
+	m.requestOrder([]string{"api", "worker", "web"})
+	m.applyPendingOrder()
+	if got := processNames(m); !reflect.DeepEqual(got, []string{"api", "worker", "web", "backup", "deploy"}) {
+		t.Fatalf("service-only order must leave task order unchanged, got %v", got)
+	}
+}
+
+func TestReorderRefusesCrossKindAndSectionEdges(t *testing.T) {
+	newGroupedModel := func() *model {
+		return newModel(Config{
+			Processes: map[string]ProcessConfig{
+				"api":    {Command: "echo ok", Group: "core"},
+				"web":    {Command: "echo ok", Group: "core"},
+				"worker": {Command: "echo ok", Group: "jobs"},
+			},
+			processOrder: []string{"api", "web", "worker"},
+			Tasks: map[string]TaskConfig{
+				"migrate": {Command: "echo ok", Group: "core"},
+				"deploy":  {Command: "echo ok", Group: "release"},
+			},
+			taskOrder: []string{"migrate", "deploy"},
+		})
+	}
+	for _, test := range []struct {
+		name       string
+		delta      int
+		wantStatus string
+	}{
+		{name: "web", delta: 1, wantStatus: "Member can't move outside its same-kind section members"},
+		{name: "worker", delta: -1, wantStatus: "Member can't move outside its same-kind section members"},
+		{name: "api", delta: -1, wantStatus: "Member can't move outside its same-kind section members"},
+		{name: "migrate", delta: 1, wantStatus: "Member can't move outside its same-kind section members"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newGroupedModel()
+			if !m.selectByName(test.name) {
+				t.Fatalf("expected %s member", test.name)
+			}
+			if cmd := m.moveSelectedCmd(test.delta); cmd != nil {
+				t.Fatalf("expected %s movement by %d to be refused", test.name, test.delta)
+			}
+			if got := m.statusText; got != test.wantStatus {
+				t.Fatalf("expected refusal status %q, got %q", test.wantStatus, got)
+			}
+		})
 	}
 }
 
@@ -943,6 +1810,69 @@ processes:
 	}
 	if got := cfg.Processes["app"].Cwd; got != workingDir {
 		t.Fatalf("expected cwd %q, got %q", workingDir, got)
+	}
+}
+
+func TestLoadConfigGroups(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+    group: " hub "
+  worker:
+    command: echo ok
+    group: "   "
+tasks:
+  deploy:
+    command: echo deploy
+    group: " hub "
+`)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.Processes["api"].Group; got != "hub" {
+		t.Fatalf("expected trimmed process group hub, got %q", got)
+	}
+	if got := cfg.Processes["worker"].Group; got != "" {
+		t.Fatalf("expected whitespace-only process group to be unset, got %q", got)
+	}
+	if got := cfg.Tasks["deploy"].Group; got != "hub" {
+		t.Fatalf("expected trimmed task group hub, got %q", got)
+	}
+
+	m := newModel(cfg)
+	api := m.processByName("api")
+	deploy := m.processByName("deploy")
+	if api == nil || api.Group() != "hub" {
+		t.Fatalf("expected api runtime group hub, got %#v", api)
+	}
+	if deploy == nil || deploy.Group() != "hub" {
+		t.Fatalf("expected deploy runtime group hub, got %#v", deploy)
+	}
+	deploy.SetGroup("runtime")
+	if got := deploy.Group(); got != "runtime" {
+		t.Fatalf("expected runtime group, got %q", got)
+	}
+
+	reloadedPath := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: echo ok
+tasks:
+  deploy:
+    command: echo deploy
+    group: " platform "
+`)
+	reloaded, err := loadConfig(reloadedPath)
+	if err != nil {
+		t.Fatalf("load reloaded config: %v", err)
+	}
+	m.applyConfigDiff(reloaded)
+	if got := m.processByName("deploy").Group(); got != "platform" {
+		t.Fatalf("expected reloaded task group platform, got %q", got)
 	}
 }
 

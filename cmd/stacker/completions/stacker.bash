@@ -18,6 +18,13 @@ _stacker_candidates() {
 	"${_stacker_bin}" "${config_flag[@]}" __complete "$@" 2>/dev/null | cut -f1
 }
 
+_stacker_group_candidates() {
+	local candidate
+	while IFS= read -r candidate; do
+		[[ "$candidate" == "$current"* ]] && COMPREPLY+=("$candidate")
+	done < <(_stacker_candidates groups)
+}
+
 _stacker_complete() {
 	local current previous words index
 	COMPREPLY=()
@@ -38,7 +45,7 @@ _stacker_complete() {
 			((index++))
 			;;
 		--config=*) _stacker_config="${words#--config=}" ;;
-		-n | --tail | --lines | --since) ((index++)) ;;
+		-n | --tail | --lines | --since | --group | -g) ((index++)) ;;
 		-*) ;;
 		*) positional+=("$words") ;;
 		esac
@@ -57,6 +64,10 @@ _stacker_complete() {
 		return 0
 		;;
 	-n | --tail | --lines | --since)
+		return 0
+		;;
+	--group | -g)
+		_stacker_group_candidates
 		return 0
 		;;
 	esac

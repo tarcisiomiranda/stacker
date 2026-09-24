@@ -21,8 +21,51 @@ pre { overflow: auto; }
   </a>
   <p class="px-4 py-1 text-neutral-600 text-xs break-all border-b border-neutral-800">{{.Config}}</p>
   <nav id="plist" class="flex-1 overflow-y-auto py-2">
+    {{if .Grouped}}
+    {{range .Sections}}
+    <section data-sidebar-section data-group-section="{{.Name}}" data-group-value="{{.GroupValue}}">
+      <div class="flex items-center justify-between gap-1 px-2 py-1.5 bg-neutral-900">
+        <button data-group-fold aria-expanded="true" class="min-w-0 flex flex-1 items-center gap-1 text-left cursor-pointer">
+          <span class="h-px flex-1 bg-neutral-700"></span><span data-fold-icon>−</span><span class="min-w-0 truncate">{{.Name}}</span><span class="h-px flex-1 bg-neutral-700"></span>
+          {{if .Total}}
+          <span data-group-summary class="text-xs {{if eq .State "running"}}text-green-400{{else if eq .State "failed"}}text-red-400{{else if eq .State "error"}}text-amber-400{{else}}text-neutral-500{{end}}">{{.Running}}/{{.Total}}</span>
+          {{end}}
+        </button>
+        <div class="flex shrink-0">
+          <button data-group-action="start" data-group-value="{{.GroupValue}}" title="Start all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">▶</button>
+          <button data-group-action="stop" data-group-value="{{.GroupValue}}" title="Stop all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">■</button>
+          <button data-group-action="restart" data-group-value="{{.GroupValue}}" title="Restart all in {{.Name}}" class="px-1 text-neutral-500 hover:text-white cursor-pointer">↻</button>
+        </div>
+      </div>
+      <div data-section-members>
+        {{range .Services}}
+        <div data-prow="{{.Name}}" data-group-member="{{.Name}}" data-group="{{.Group}}" data-orphaned="{{.Orphaned}}" draggable="true" title="drag to reorder or change group"
+             class="flex items-stretch cursor-grab hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
+          <a href="/logs/{{.NameEscaped}}" draggable="false"
+             class="flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-1.5 {{if .Current}}text-white{{end}}">
+            <span class="truncate flex items-center gap-1.5"><span data-pcolor="{{.Name}}" class="inline-block size-2 rounded-full shrink-0{{if not .Color}} hidden{{end}}" style="background: {{.Color}}"></span>{{.Name}}</span>
+            <span data-pstatus="{{.Name}}" class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
+          </a>
+          <button data-act="restart" data-name="{{.NameEscaped}}" title="restart {{.Name}}" class="px-1.5 text-neutral-500 hover:text-white cursor-pointer">↻</button>
+        </div>
+        {{end}}
+        {{range .Tasks}}
+        <div data-trow="{{.Name}}" data-group-member="{{.Name}}" data-group="{{.Group}}" data-orphaned="{{.Orphaned}}" draggable="true" title="drag to reorder or change group"
+             class="flex items-stretch cursor-grab hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
+          <a href="/logs/{{.NameEscaped}}" draggable="false"
+             class="flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-1.5 {{if .Current}}text-white{{end}}">
+            <span class="truncate flex items-center gap-1.5"><span class="text-neutral-500 shrink-0">▶</span><span data-pcolor="{{.Name}}" class="inline-block size-2 rounded-full shrink-0{{if not .Color}} hidden{{end}}" style="background: {{.Color}}"></span>{{.Name}}</span>
+            <span data-pstatus="{{.Name}}" data-task="1" class="text-xs {{if and .Errors (ne .Status "failed")}}text-amber-400{{else if eq .Status "running"}}text-green-400{{else if eq .Status "failed"}}text-red-400{{else}}text-neutral-500{{end}}">{{.Status}}{{if and .Errors (ne .Status "failed")}}!{{end}}</span>
+          </a>
+          <button data-act="start" data-name="{{.NameEscaped}}" title="run {{.Name}}" class="px-1.5 text-neutral-500 hover:text-white cursor-pointer">▶</button>
+        </div>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+    {{else}}
     {{range .Processes}}
-    <div data-prow="{{.Name}}" draggable="true" title="drag to reorder (saved to YAML)"
+    <div data-prow="{{.Name}}" data-group="{{.Group}}" data-orphaned="{{.Orphaned}}" draggable="true" title="drag to reorder (saved to YAML)"
          class="flex items-stretch cursor-grab hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
       <a href="/logs/{{.NameEscaped}}" draggable="false"
          class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
@@ -36,7 +79,7 @@ pre { overflow: auto; }
     {{if .Standalone}}
     <p id="task-head" class="px-4 pt-3 pb-1 text-xs uppercase tracking-wide text-neutral-500">Tasks · one-shot</p>
     {{range .Standalone}}
-    <div data-trow="{{.Name}}"
+    <div data-trow="{{.Name}}" data-group="{{.Group}}" data-orphaned="{{.Orphaned}}"
          class="flex items-stretch hover:bg-neutral-800 {{if .Current}}bg-neutral-800 border-l-2 border-sky-400{{else}}border-l-2 border-transparent{{end}}">
       <a href="/logs/{{.NameEscaped}}"
          class="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 {{if .Current}}text-white{{end}}">
@@ -46,6 +89,7 @@ pre { overflow: auto; }
       <button data-act="start" data-name="{{.NameEscaped}}" title="run {{.Name}}"
               class="px-2 text-neutral-500 hover:text-white cursor-pointer">▶</button>
     </div>
+    {{end}}
     {{end}}
     {{end}}
   </nav>
@@ -161,13 +205,7 @@ wrap.addEventListener("change", syncWrap);
 // picks the change up immediately.
 document.getElementById("herr").addEventListener("change", async (e) => {
   try {
-    const resp = await fetch("/api/highlight-errors", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: e.target.checked }),
-    });
-    const d = await resp.json();
-    if (!d.ok) throw new Error(d.error || "failed");
+    const d = await postJSON("/api/highlight-errors", { enabled: e.target.checked });
     msg.textContent = "error badge " + (d.enabled ? "on" : "off") + " (saved)";
   } catch (err) {
     e.target.checked = !e.target.checked;
@@ -181,14 +219,70 @@ document.getElementById("herr").addEventListener("change", async (e) => {
 const plist = document.getElementById("plist");
 let dragRow = null;
 let orderBefore = null;
+let dragStartGrouped = false;
+let dragStartSection = "";
+let dragOrigin = null;
+let sidebarSignature = null;
+let expectedSidebarStructure = null;
+const sidebarOrderGraceMs = 2000;
+
+const foldStorageKey = "stacker:folded:" + {{.Config}};
+let foldedGroups = new Set();
+try {
+  foldedGroups = new Set(JSON.parse(localStorage.getItem(foldStorageKey) || "[]"));
+} catch {}
+
+function setSectionFold(section, folded) {
+  section.querySelector("[data-section-members]").classList.toggle("hidden", folded);
+  const toggle = section.querySelector("[data-group-fold]");
+  toggle.setAttribute("aria-expanded", String(!folded));
+  toggle.querySelector("[data-fold-icon]").textContent = folded ? "+" : "−";
+  if (folded) foldedGroups.add(section.dataset.groupSection);
+  else foldedGroups.delete(section.dataset.groupSection);
+  try {
+    localStorage.setItem(foldStorageKey, JSON.stringify([...foldedGroups]));
+  } catch {}
+}
+
+function wireGroupSections() {
+  for (const section of plist.querySelectorAll("[data-sidebar-section]")) {
+    setSectionFold(section, foldedGroups.has(section.dataset.groupSection));
+    section.querySelector("[data-group-fold]").addEventListener("click", () => {
+      setSectionFold(section, !section.querySelector("[data-section-members]").classList.contains("hidden"));
+    });
+  }
+}
+
+wireGroupSections();
+
+async function postJSON(url, body) {
+  const options = { method: "POST" };
+  if (body !== undefined) {
+    options.headers = { "Content-Type": "application/json" };
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {}
+  if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
 
 function sidebarOrder() {
-  return [...plist.querySelectorAll("[data-prow]")].map((r) => r.dataset.prow);
+  return [...plist.querySelectorAll("[data-prow], [data-trow]")]
+    .filter((row) => row.dataset.orphaned !== "true")
+    .map((row) => row.dataset.prow || row.dataset.trow);
 }
 
 plist.addEventListener("dragstart", (e) => {
-  dragRow = e.target.closest("[data-prow]");
-  if (!dragRow) return;
+  const row = e.target.closest("[data-prow], [data-trow]");
+  if (!row || !row.draggable) return;
+  dragRow = row;
+  dragStartGrouped = plist.querySelector("[data-sidebar-section]") !== null;
+  dragStartSection = row.closest("[data-sidebar-section]")?.dataset.groupSection || "";
+  dragOrigin = { parent: row.parentNode, nextSibling: row.nextSibling, group: row.dataset.group || "" };
   orderBefore = JSON.stringify(sidebarOrder());
   e.dataTransfer.effectAllowed = "move";
   dragRow.classList.add("opacity-40");
@@ -197,9 +291,25 @@ plist.addEventListener("dragstart", (e) => {
 plist.addEventListener("dragover", (e) => {
   if (!dragRow) return;
   e.preventDefault();
-  const rows = [...plist.querySelectorAll("[data-prow]")].filter((r) => r !== dragRow);
-  const after = rows.find((r) => {
-    const box = r.getBoundingClientRect();
+  if (dragStartGrouped) {
+    const section = e.target.closest("[data-sidebar-section]");
+    if (!section || !plist.contains(section)) return;
+    const members = section.querySelector("[data-section-members]");
+    const selector = dragRow.hasAttribute("data-trow") ? "[data-trow]" : "[data-prow]";
+    const rows = [...members.querySelectorAll(selector)].filter((row) => row !== dragRow);
+    const after = rows.find((row) => {
+      const box = row.getBoundingClientRect();
+      return e.clientY < box.top + box.height / 2;
+    });
+    if (after) members.insertBefore(dragRow, after);
+    else if (selector === "[data-prow]" && members.querySelector("[data-trow]")) {
+      members.insertBefore(dragRow, members.querySelector("[data-trow]"));
+    } else members.appendChild(dragRow);
+    return;
+  }
+  const rows = [...plist.querySelectorAll("[data-prow]")].filter((row) => row !== dragRow);
+  const after = rows.find((row) => {
+    const box = row.getBoundingClientRect();
     return e.clientY < box.top + box.height / 2;
   });
   const head = document.getElementById("task-head");
@@ -210,39 +320,283 @@ plist.addEventListener("dragover", (e) => {
 
 plist.addEventListener("dragend", async () => {
   if (!dragRow) return;
-  dragRow.classList.remove("opacity-40");
-  dragRow = null;
+  const row = dragRow;
+  const targetSection = row.closest("[data-sidebar-section]");
+  const targetGroup = dragStartGrouped && targetSection ? targetSection.dataset.groupValue : "";
+  const groupChanged = dragStartGrouped && targetSection && targetSection.dataset.groupSection !== dragStartSection;
   const names = sidebarOrder();
-  if (JSON.stringify(names) === orderBefore) return;
+  const orderChanged = JSON.stringify(names) !== orderBefore;
+  row.classList.remove("opacity-40");
+  if (!groupChanged && !orderChanged) {
+    dragRow = null;
+    dragOrigin = null;
+    return;
+  }
+  let failed = false;
   try {
-    const resp = await fetch("/api/order", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names }),
-    });
-    const d = await resp.json();
-    if (!d.ok) throw new Error(d.error || "failed");
+    if (groupChanged) {
+      const name = row.dataset.prow || row.dataset.trow;
+      await postJSON(`/api/${encodeURIComponent(name)}/group`, { group: targetGroup });
+      row.dataset.group = targetGroup;
+    }
+    await postJSON("/api/order", { names: sidebarOrder() });
+    expectedSidebarStructure = {
+      key: sidebarStructureKeyFromDOM(),
+      members: sidebarMemberKeyFromDOM(),
+      expiresAt: Date.now() + sidebarOrderGraceMs,
+    };
     msg.textContent = "order saved";
   } catch (err) {
+    failed = true;
     msg.textContent = "reorder failed: " + err.message;
+    restoreDraggedRow(row, dragOrigin);
+    expectedSidebarStructure = null;
+    sidebarSignature = null;
+  } finally {
+    dragRow = null;
+    dragOrigin = null;
   }
+  if (failed) poll(true);
   setTimeout(() => { msg.textContent = ""; }, 2000);
 });
 
-// Keep the sidebar in the server's order (other tabs, TUI restarts).
-function applyOrder(processes) {
-  if (dragRow) return;
-  // Only service rows are reorderable; one-shot task rows are pinned.
-  const names = (processes || []).map((p) => p.name)
-    .filter((n) => plist.querySelector(`[data-prow="${CSS.escape(n)}"]`));
-  if (JSON.stringify(names) === JSON.stringify(sidebarOrder())) return;
-  const head = document.getElementById("task-head");
-  for (const name of names) {
-    const row = plist.querySelector(`[data-prow="${CSS.escape(name)}"]`);
-    if (!row) continue;
-    if (head) plist.insertBefore(row, head);
-    else plist.appendChild(row);
+function canonicalDisplayEntries(processes) {
+  return buildProcessSections(processes).flatMap((section) => [...section.services, ...section.tasks].map((process) => [
+    process.name,
+    (process.group || "").trim(),
+    Boolean(process.one_shot),
+    Boolean(process.orphaned),
+  ]));
+}
+
+function processStructureKey(processes) {
+  return JSON.stringify(canonicalDisplayEntries(processes));
+}
+
+function sidebarEntriesFromDOM() {
+  return [...plist.querySelectorAll("[data-prow], [data-trow]")].map((row) => ({
+    name: row.dataset.prow || row.dataset.trow,
+    group: row.dataset.group || "",
+    one_shot: row.hasAttribute("data-trow"),
+    orphaned: row.dataset.orphaned === "true",
+  }));
+}
+
+function sidebarStructureKeyFromDOM() {
+  return JSON.stringify(canonicalDisplayEntries(sidebarEntriesFromDOM()));
+}
+
+function memberKey(entries) {
+  return JSON.stringify([...entries].sort((a, b) => a[0].localeCompare(b[0])));
+}
+
+function sidebarMemberKeyFromDOM() {
+  return memberKey(JSON.parse(sidebarStructureKeyFromDOM()));
+}
+
+function restoreDraggedRow(row, origin) {
+  if (!origin || !origin.parent) return;
+  if (origin.nextSibling && origin.nextSibling.parentNode === origin.parent) {
+    origin.parent.insertBefore(row, origin.nextSibling);
+  } else {
+    origin.parent.appendChild(row);
   }
+  row.dataset.group = origin.group;
+}
+
+function makeSidebarRow(process, grouped) {
+  const task = Boolean(process.one_shot);
+  const name = process.name;
+  const row = document.createElement("div");
+  row.dataset[task ? "trow" : "prow"] = name;
+  row.dataset.groupMember = name;
+  row.dataset.group = process.group || "";
+  row.dataset.orphaned = String(Boolean(process.orphaned));
+  row.draggable = grouped || !task;
+  row.title = grouped ? "drag to reorder or change group" : "drag to reorder (saved to YAML)";
+  row.className = `flex items-stretch ${row.draggable ? "cursor-grab" : ""} hover:bg-neutral-800 ${name === currentName ? "bg-neutral-800 border-l-2 border-sky-400" : "border-l-2 border-transparent"}`;
+
+  const link = document.createElement("a");
+  link.href = "/logs/" + encodeURIComponent(name);
+  link.draggable = false;
+  link.className = `flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-1.5 ${name === currentName ? "text-white" : ""}`;
+  const label = document.createElement("span");
+  label.className = "truncate flex items-center gap-1.5";
+  if (task) {
+    const marker = document.createElement("span");
+    marker.className = "text-neutral-500 shrink-0";
+    marker.textContent = "▶";
+    label.append(marker);
+  }
+  const dot = document.createElement("span");
+  dot.dataset.pcolor = name;
+  dot.className = `inline-block size-2 rounded-full shrink-0${process.color ? "" : " hidden"}`;
+  dot.style.background = process.color || "";
+  label.append(dot, document.createTextNode(name));
+  const status = document.createElement("span");
+  status.dataset.pstatus = name;
+  if (task) status.dataset.task = "1";
+  status.className = `text-xs ${statusClass(process.status, process.errors || 0)}`;
+  status.textContent = process.status + ((process.errors || 0) > 0 && process.status !== "failed" ? "!" : "");
+  link.append(label, status);
+
+  const action = document.createElement("button");
+  action.dataset.act = task ? "start" : "restart";
+  action.dataset.name = encodeURIComponent(name);
+  action.title = `${task ? "run" : "restart"} ${name}`;
+  action.className = "px-2 text-neutral-500 hover:text-white cursor-pointer";
+  action.textContent = task ? "▶" : "↻";
+  row.append(link, action);
+  return row;
+}
+
+function buildProcessSections(processes) {
+  const sections = [];
+  const byName = new Map();
+  for (const process of processes || []) {
+    const explicitGroup = (process.group || "").trim();
+    const name = explicitGroup || "Other";
+    let section = byName.get(name);
+    if (!section) {
+      section = { name, groupValue: name === "Other" ? "" : explicitGroup, implicit: !explicitGroup, services: [], tasks: [] };
+      byName.set(name, section);
+      sections.push(section);
+    } else if (name === "Other" && explicitGroup) {
+      section.implicit = false;
+      section.groupValue = "";
+    }
+    (process.one_shot ? section.tasks : section.services).push(process);
+  }
+  const services = sections.filter((section) => section.name !== "Other" && section.services.length);
+  const tasks = sections.filter((section) => section.name !== "Other" && !section.services.length);
+  const other = sections.filter((section) => section.name === "Other");
+  return [...services, ...tasks, ...other];
+}
+
+function wireGroupActions() {
+  for (const button of plist.querySelectorAll("[data-group-action]")) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const data = await postJSON("/api/groups/" + button.dataset.groupAction, { group: button.dataset.groupValue });
+        msg.textContent = `${button.dataset.groupAction} all sent for ${data.group}`;
+      } catch (error) {
+        msg.textContent = `${button.dataset.groupAction} all failed: ${error.message}`;
+      }
+      button.disabled = false;
+    });
+  }
+}
+
+wireGroupActions();
+
+function makeGroupSection(section) {
+  const element = document.createElement("section");
+  element.dataset.sidebarSection = "";
+  element.dataset.groupSection = section.name;
+  element.dataset.groupValue = section.groupValue;
+  const serviceStates = section.services;
+  const running = serviceStates.filter((process) => process.status === "running").length;
+  const total = serviceStates.length;
+  const hasError = [...section.services, ...section.tasks].some((process) => (process.errors || 0) > 0);
+  const hasFailed = [...section.services, ...section.tasks].some((process) => process.status === "failed");
+  const state = hasError ? "text-amber-400" : hasFailed ? "text-red-400" : total > 0 && running === total ? "text-green-400" : "text-neutral-500";
+
+  const header = document.createElement("div");
+  header.className = "flex items-center justify-between gap-1 px-2 py-1.5 bg-neutral-900";
+  const fold = document.createElement("button");
+  fold.dataset.groupFold = "";
+  fold.setAttribute("aria-expanded", "true");
+  fold.className = "min-w-0 flex flex-1 items-center gap-1 text-left cursor-pointer";
+  const leftRule = makeRuleSegment();
+  const icon = document.createElement("span");
+  icon.dataset.foldIcon = "";
+  icon.textContent = "−";
+  const title = document.createElement("span");
+  title.className = "min-w-0 truncate";
+  title.textContent = section.name;
+  const rightRule = makeRuleSegment();
+  fold.append(leftRule, icon, title, rightRule);
+  if (total > 0) {
+    const summary = document.createElement("span");
+    summary.dataset.groupSummary = "";
+    summary.className = `text-xs ${state}`;
+    summary.textContent = `${running}/${total}`;
+    fold.append(summary);
+  }
+  header.append(fold);
+
+  const actions = document.createElement("div");
+  actions.className = "flex shrink-0";
+  for (const [action, label, title] of [["start", "▶", "Start all"], ["stop", "■", "Stop all"], ["restart", "↻", "Restart all"]]) {
+    const button = document.createElement("button");
+    button.dataset.groupAction = action;
+    button.dataset.groupValue = section.groupValue;
+    button.title = `${title} in ${section.name}`;
+    button.className = "px-1 text-neutral-500 hover:text-white cursor-pointer";
+    button.textContent = label;
+    actions.append(button);
+  }
+  header.append(actions);
+  const members = document.createElement("div");
+  members.dataset.sectionMembers = "";
+  for (const process of [...section.services, ...section.tasks]) {
+    members.append(makeSidebarRow(process, true));
+  }
+  element.append(header, members);
+  return element;
+}
+
+function makeRuleSegment() {
+  const rule = document.createElement("span");
+  rule.className = "h-px bg-neutral-700 flex-1";
+  return rule;
+}
+
+function renderSidebar(processes) {
+  const grouped = (processes || []).some((process) => (process.group || "").trim() !== "");
+  if (grouped) {
+    const sections = buildProcessSections(processes);
+    plist.replaceChildren(...sections.map((section) => makeGroupSection(section)));
+    wireGroupSections();
+    wireGroupActions();
+    return;
+  }
+  const services = (processes || []).filter((process) => !process.one_shot);
+  const tasks = (processes || []).filter((process) => process.one_shot);
+  const rows = services.map((process) => makeSidebarRow(process, false));
+  if (tasks.length) {
+    const heading = document.createElement("p");
+    heading.id = "task-head";
+    heading.className = "px-4 pt-3 pb-1 text-xs uppercase tracking-wide text-neutral-500";
+    heading.textContent = "Tasks · one-shot";
+    rows.push(heading);
+    rows.push(...tasks.map((process) => makeSidebarRow(process, false)));
+  }
+  plist.replaceChildren(...rows);
+}
+
+function reconcileSidebar(processes) {
+  if (dragRow) return;
+  const key = processStructureKey(processes);
+  if (expectedSidebarStructure) {
+    if (key === expectedSidebarStructure.key) {
+      expectedSidebarStructure = null;
+      if (key !== sidebarSignature) {
+        renderSidebar(processes);
+        sidebarSignature = key;
+      }
+      return;
+    }
+    if (Date.now() < expectedSidebarStructure.expiresAt && memberKey(canonicalDisplayEntries(processes)) === expectedSidebarStructure.members) {
+      return;
+    }
+    expectedSidebarStructure = null;
+    sidebarSignature = null;
+  }
+  if (key === sidebarSignature) return;
+  renderSidebar(processes);
+  sidebarSignature = key;
 }
 
 // Color selector: swatch palette + custom picker; POSTs to the server, which
@@ -280,13 +634,7 @@ function applyColor(name, color) {
 async function setColor(color) {
   morePop.classList.add("hidden");
   try {
-    const resp = await fetch("/api/{{.NameEscaped}}/color", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ color }),
-    });
-    const d = await resp.json();
-    if (!d.ok) throw new Error(d.error || "failed");
+    const d = await postJSON("/api/{{.NameEscaped}}/color", { color });
     applyColor(currentName, d.color);
     msg.textContent = d.color ? `color ${d.color} saved` : "color removed";
   } catch (e) {
@@ -301,17 +649,11 @@ moreBtn.addEventListener("click", (e) => {
 });
 
 // One-shot task buttons: fire and forget; output streams into the log below.
-document.querySelectorAll("[data-task]").forEach((btn) => {
+document.querySelectorAll("button[data-task]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     morePop.classList.add("hidden");
     try {
-      const resp = await fetch("/api/{{.NameEscaped}}/task", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: btn.dataset.task }),
-      });
-      const d = await resp.json();
-      if (!d.ok) throw new Error(d.error || "failed");
+      await postJSON("/api/{{.NameEscaped}}/task", { name: btn.dataset.task });
       msg.textContent = "task " + btn.dataset.task + " started";
       poll(true);
     } catch (e) {
@@ -345,8 +687,7 @@ addEventListener("keydown", (e) => {
 
 async function markAllNow() {
   try {
-    const resp = await fetch("/api/mark-all", { method: "POST" });
-    const d = await resp.json();
+    const d = await postJSON("/api/mark-all");
     msg.textContent = `marked ${d.marked} running`;
     poll(true);
   } catch {
@@ -359,7 +700,7 @@ document.getElementById("mark-all").addEventListener("click", markAllNow);
 const markURL = "/api/{{.NameEscaped}}/mark";
 async function markNow() {
   try {
-    await fetch(markURL, { method: "POST" });
+    await postJSON(markURL);
     msg.textContent = "marked";
     poll(true);
   } catch {
@@ -370,18 +711,18 @@ async function markNow() {
 document.getElementById("mark").addEventListener("click", markNow);
 
 // Start/stop/restart buttons; statuses refresh through the poll, no reload.
-document.querySelectorAll("[data-act]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    try {
-      await fetch("/api/" + btn.dataset.name + "/" + btn.dataset.act, { method: "POST" });
-      msg.textContent = btn.dataset.act + " sent";
-    } catch {
-      msg.textContent = btn.dataset.act + " failed";
-    }
-    btn.disabled = false;
-    setTimeout(() => { msg.textContent = ""; }, 2000);
-  });
+document.addEventListener("click", async (e) => {
+  const button = e.target.closest("[data-act]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await postJSON("/api/" + button.dataset.name + "/" + button.dataset.act);
+    msg.textContent = button.dataset.act + " sent";
+  } catch (error) {
+    msg.textContent = button.dataset.act + " failed: " + error.message;
+  }
+  button.disabled = false;
+  setTimeout(() => { msg.textContent = ""; }, 2000);
 });
 
 document.getElementById("copy").addEventListener("click", async () => {
@@ -414,7 +755,7 @@ function statusClass(s, errs) {
 }
 
 function updateStatuses(processes) {
-  applyOrder(processes);
+  reconcileSidebar(processes || []);
   for (const p of processes || []) {
     applyColor(p.name, p.color || "");
     const errs = p.errors || 0;
@@ -435,6 +776,20 @@ function updateStatuses(processes) {
       cur.classList.add(statusClass(p.status, errs));
     }
   }
+  for (const section of plist.querySelectorAll("[data-sidebar-section]")) {
+    const groupName = section.dataset.groupSection;
+    const groupedMembers = (processes || []).filter((process) => ((process.group || "").trim() || "Other") === groupName);
+    const members = groupedMembers.filter((process) => !process.one_shot);
+    const running = members.filter((process) => process.status === "running").length;
+    const summary = section.querySelector("[data-group-summary]");
+    if (summary) {
+      summary.textContent = `${running}/${members.length}`;
+      const hasError = groupedMembers.some((process) => (process.errors || 0) > 0);
+      const hasFailed = groupedMembers.some((process) => process.status === "failed");
+      summary.classList.remove("text-green-400", "text-red-400", "text-amber-400", "text-neutral-500");
+      summary.classList.add(hasError ? "text-amber-400" : hasFailed ? "text-red-400" : members.length > 0 && running === members.length ? "text-green-400" : "text-neutral-500");
+    }
+  }
 }
 
 async function poll(force) {
@@ -446,6 +801,7 @@ async function poll(force) {
     const resp = await fetch(`/api/{{.NameEscaped}}/tail${q}`);
     if (!resp.ok) return;
     const d = await resp.json();
+    if (!d.ok) throw new Error(d.error || "failed");
     updateStatuses(d.processes);
     if (wantLines && d.lines && d.lines.length) {
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;

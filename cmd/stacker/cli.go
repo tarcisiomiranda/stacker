@@ -79,23 +79,11 @@ func runCLI(configPath string, explicit bool, args []string) int {
 		}
 		return cliStatus(configPath, name, jsonOut)
 	case "start":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: stacker start <name>")
-			return 2
-		}
-		return cliAction(configPath, rest[0], "start", jsonOut)
+		return cliProcessAction(configPath, rest, "start", jsonOut)
 	case "stop":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: stacker stop <name>")
-			return 2
-		}
-		return cliAction(configPath, rest[0], "stop", jsonOut)
+		return cliProcessAction(configPath, rest, "stop", jsonOut)
 	case "restart":
-		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: stacker restart <name>")
-			return 2
-		}
-		return cliAction(configPath, rest[0], "restart", jsonOut)
+		return cliProcessAction(configPath, rest, "restart", jsonOut)
 	case "free-port", "freeport":
 		if len(rest) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: stacker free-port <port>")
@@ -146,9 +134,9 @@ Commands:
   status [name]        Status of all processes, or one by name
   logs <name>          Print a process log (see "Log flags" below)
   logs --supervisor    Print the daemon's own log (works with no instance up)
-  start <name>         Start a process (frees configured port first)
-  stop <name>          Stop a process
-  restart <name>       Stop then start a process
+  start <name>|--group <name>    Start a process or group (frees configured port first)
+  stop <name>|--group <name>     Stop a process or group
+  restart <name>|--group <name>  Stop then start a process or group
   free-port <port>     Kill whatever is listening on TCP port (no TUI required)
   tasks [name]         List one-shot tasks (all processes, or one by name)
   run <proc> <task>    Run a one-shot task in a process (output goes to its log)
@@ -158,6 +146,8 @@ Commands:
 Flags:
   --config path, -config path   Path to stacker.yml (default: stacker.yml in cwd)
   --json                        Machine-readable JSON output (for AI agents)
+  --group name, -g name         Apply start/stop/restart to a group
+  --group=name                  Group form for start/stop/restart
 
 Log flags (stacker logs):
   -n N, --tail N       Last N lines (default 200); --all for everything kept
@@ -335,13 +325,36 @@ func cliList(configPath string, jsonOut bool) int {
 		return 0
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATUS\tPORT")
-	for _, p := range resp.Processes {
+	fmt.Fprintln(w, "NAME\tSTATUS\tPORT\tGROUP")
+	writeMember := func(member sectionMember) {
+		process := resp.Processes[member.Index]
 		port := "-"
-		if p.Port > 0 {
-			port = strconv.Itoa(p.Port)
+		if process.Port > 0 {
+			port = strconv.Itoa(process.Port)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", p.Name, p.Status, port)
+		group := strings.TrimSpace(process.Group)
+		if group == "" {
+			group = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", process.Name, process.Status, port, group)
+	}
+	members := make([]sectionMember, 0, len(resp.Processes))
+	for index, process := range resp.Processes {
+		members = append(members, sectionMember{
+			Name:     process.Name,
+			Group:    process.Group,
+			OneShot:  process.OneShot,
+			Orphaned: process.Orphaned,
+			Index:    index,
+		})
+	}
+	for _, current := range buildSections(members) {
+		for _, member := range current.Services {
+			writeMember(member)
+		}
+		for _, member := range current.Tasks {
+			writeMember(member)
+		}
 	}
 	_ = w.Flush()
 	return 0
@@ -414,6 +427,129 @@ func cliAction(configPath, name, action string, jsonOut bool) int {
 	}
 	fmt.Printf("%s %s → %s\n", action, resp.Process.Name, resp.Process.Status)
 	return 0
+}
+
+func cliProcessAction(configPath string, args []string, action string, jsonOut bool) int {
+	group, groupSet, names, err := parseGroupActionArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "usage: stacker %s <name> | --group <group>\n", action)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 2
+	}
+	if groupSet {
+		return cliGroupAction(configPath, group, action, jsonOut)
+	}
+	if len(names) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: stacker %s <name> | --group <group>\n", action)
+		return 2
+	}
+	return cliAction(configPath, names[0], action, jsonOut)
+}
+
+func parseGroupActionArgs(args []string) (string, bool, []string, error) {
+	var group string
+	groupSet := false
+	var names []string
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--group" || arg == "-g":
+			if groupSet {
+				return "", false, nil, fmt.Errorf("group specified more than once")
+			}
+			if index+1 >= len(args) {
+				return "", false, nil, fmt.Errorf("%s requires a group name", arg)
+			}
+			groupSet = true
+			index++
+			group = args[index]
+		case strings.HasPrefix(arg, "--group="):
+			if groupSet {
+				return "", false, nil, fmt.Errorf("group specified more than once")
+			}
+			groupSet = true
+			group = strings.TrimPrefix(arg, "--group=")
+		default:
+			names = append(names, arg)
+		}
+	}
+	if groupSet && len(names) > 0 {
+		return "", false, nil, fmt.Errorf("group mode does not accept a process name")
+	}
+	return group, groupSet, names, nil
+}
+
+func cliGroupAction(configPath, group, action string, jsonOut bool) int {
+	client, _, err := newControlClient(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	response := make(map[string]any)
+	path := "/v1/groups/" + action
+	err = client.post(path, map[string]string{"group": group}, &response)
+	if err != nil {
+		message, _ := response["error"].(string)
+		if message == "" {
+			message = err.Error()
+		}
+		fmt.Fprintln(os.Stderr, "error:", message)
+		if strings.Contains(message, "unknown group") {
+			printKnownGroups(client)
+		}
+		return 1
+	}
+	if ok, _ := response["ok"].(bool); !ok {
+		message, _ := response["error"].(string)
+		fmt.Fprintln(os.Stderr, "error:", message)
+		if strings.Contains(message, "unknown group") {
+			printKnownGroups(client)
+		}
+		return 1
+	}
+	if jsonOut {
+		_ = json.NewEncoder(os.Stdout).Encode(response)
+		return 0
+	}
+	affected, _ := response["affected"].([]any)
+	names := make([]string, 0, len(affected))
+	for _, value := range affected {
+		if name, ok := value.(string); ok {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		fmt.Printf("%s group %s → no processes affected\n", action, group)
+		return 0
+	}
+	fmt.Printf("%s group %s → %s\n", action, group, strings.Join(names, ", "))
+	return 0
+}
+
+func printKnownGroups(client *controlClient) {
+	var response struct {
+		Processes []ProcessInfo `json:"processes"`
+	}
+	if err := client.get("/v1/processes", &response); err != nil {
+		fmt.Fprintln(os.Stderr, "known groups unavailable:", err)
+		return
+	}
+	members := make([]sectionMember, 0, len(response.Processes))
+	for index, process := range response.Processes {
+		members = append(members, sectionMember{
+			Name:     process.Name,
+			Group:    process.Group,
+			OneShot:  process.OneShot,
+			Orphaned: process.Orphaned,
+			Index:    index,
+		})
+	}
+	groups := buildSections(members)
+	names := make([]string, 0, len(groups))
+	for _, group := range groups {
+		names = append(names, group.Name)
+	}
+	fmt.Fprintf(os.Stderr, "known groups: %s\n", strings.Join(names, ", "))
 }
 
 func cliFreePort(configPath, portStr string, jsonOut bool) int {

@@ -36,14 +36,17 @@ func runAttach(configPath string) int {
 
 type attachTickMsg struct{}
 type attachSnapMsg struct {
+	seq   uint64
 	procs []ProcessInfo
 	err   error
 }
 type attachLogsMsg struct {
-	name  string
-	lines []string
-	next  int
-	err   error
+	seq        uint64
+	generation uint64
+	name       string
+	lines      []string
+	next       int
+	err        error
 }
 type attachStatusMsg string
 
@@ -57,14 +60,23 @@ type attachWebMsg struct {
 }
 
 type attachModel struct {
-	client     *controlClient
-	configPath string
+	client           *controlClient
+	configPath       string
+	collapsedPath    string
+	collapsedPathErr error
+	collapsed        map[string]bool
 
-	procs    []ProcessInfo
-	selected int
-	logs     []string
-	logNext  int
-	logName  string
+	procs               []ProcessInfo
+	selected            int
+	hasSnapshot         bool
+	snapshotSeq         uint64
+	selectionGeneration uint64
+	logRequestSeq       uint64
+	logInFlightSeq      uint64
+	logInFlight         bool
+	logs                []string
+	logNext             int
+	logName             string
 
 	width, height int
 	logOffset     int
@@ -77,13 +89,21 @@ type attachModel struct {
 }
 
 func newAttachModel(client *controlClient, configPath string) *attachModel {
-	return &attachModel{
+	m := &attachModel{
 		client:     client,
 		configPath: configPath,
+		collapsed:  make(map[string]bool),
 		selected:   0,
 		follow:     true,
 		wrap:       false,
 	}
+	if statePath, err := uiStatePath(configPath); err == nil {
+		m.collapsedPath = statePath
+		m.collapsed = loadCollapsedOrEmpty(statePath)
+	} else {
+		m.collapsedPathErr = err
+	}
+	return m
 }
 
 func (m *attachModel) Init() tea.Cmd {
@@ -95,6 +115,8 @@ func (m *attachModel) tick() tea.Cmd {
 }
 
 func (m *attachModel) pollSnap() tea.Cmd {
+	m.snapshotSeq++
+	seq := m.snapshotSeq
 	return func() tea.Msg {
 		var resp struct {
 			OK        bool          `json:"ok"`
@@ -102,20 +124,25 @@ func (m *attachModel) pollSnap() tea.Cmd {
 			Processes []ProcessInfo `json:"processes"`
 		}
 		if err := m.client.get("/v1/processes", &resp); err != nil {
-			return attachSnapMsg{err: err}
+			return attachSnapMsg{seq: seq, err: err}
 		}
 		if !resp.OK && resp.Error != "" {
-			return attachSnapMsg{err: fmt.Errorf("%s", resp.Error)}
+			return attachSnapMsg{seq: seq, err: fmt.Errorf("%s", resp.Error)}
 		}
-		return attachSnapMsg{procs: resp.Processes}
+		return attachSnapMsg{seq: seq, procs: resp.Processes}
 	}
 }
 
 func (m *attachModel) pollLogs() tea.Cmd {
 	name := m.currentName()
-	if name == "" {
+	if name == "" || m.logInFlight {
 		return nil
 	}
+	m.logRequestSeq++
+	seq := m.logRequestSeq
+	generation := m.selectionGeneration
+	m.logInFlight = true
+	m.logInFlightSeq = seq
 	from := m.logNext
 	if m.logName != name {
 		from = 0
@@ -129,27 +156,228 @@ func (m *attachModel) pollLogs() tea.Cmd {
 			Next  int      `json:"next"`
 		}
 		if err := m.client.get(path, &resp); err != nil {
-			return attachLogsMsg{name: name, err: err}
+			return attachLogsMsg{seq: seq, generation: generation, name: name, err: err}
 		}
 		if !resp.OK && resp.Error != "" {
-			return attachLogsMsg{name: name, err: fmt.Errorf("%s", resp.Error)}
+			return attachLogsMsg{seq: seq, generation: generation, name: name, err: fmt.Errorf("%s", resp.Error)}
 		}
-		return attachLogsMsg{name: name, lines: resp.Lines, next: resp.Next}
+		return attachLogsMsg{seq: seq, generation: generation, name: name, lines: resp.Lines, next: resp.Next}
 	}
 }
 
 func (m *attachModel) currentName() string {
-	if m.selected < 0 || m.selected >= len(m.procs) {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) || rows[m.selected].Member == nil {
 		return ""
 	}
-	return m.procs[m.selected].Name
+	index := rows[m.selected].Member.Index
+	if index < 0 || index >= len(m.procs) {
+		return ""
+	}
+	return m.procs[index].Name
 }
 
 func (m *attachModel) current() *ProcessInfo {
-	if m.selected < 0 || m.selected >= len(m.procs) {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) || rows[m.selected].Member == nil {
 		return nil
 	}
-	return &m.procs[m.selected]
+	index := rows[m.selected].Member.Index
+	if index < 0 || index >= len(m.procs) {
+		return nil
+	}
+	return &m.procs[index]
+}
+
+func (m *attachModel) members() []sectionMember {
+	members := make([]sectionMember, 0, len(m.procs))
+	for index, process := range m.procs {
+		members = append(members, sectionMember{
+			Name:     process.Name,
+			Group:    process.Group,
+			OneShot:  process.OneShot,
+			Orphaned: process.Orphaned,
+			Index:    index,
+		})
+	}
+	return members
+}
+
+func (m *attachModel) sections() []section {
+	return buildSections(m.members())
+}
+
+func (m *attachModel) rows() []listRow {
+	return buildRows(m.sections(), m.collapsed)
+}
+
+func (m *attachModel) summarizeSection(current *section) sectionSummary {
+	states := make([]memberState, 0, len(current.Services)+len(current.Tasks))
+	for _, members := range [][]sectionMember{current.Services, current.Tasks} {
+		for _, member := range members {
+			if member.Index < 0 || member.Index >= len(m.procs) {
+				continue
+			}
+			process := m.procs[member.Index]
+			states = append(states, memberState{
+				Status:  ProcessStatus(process.Status),
+				Errors:  process.Errors,
+				OneShot: member.OneShot,
+			})
+		}
+	}
+	return summarizeSection(states)
+}
+
+func (m *attachModel) selectedSection() *section {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return nil
+	}
+	return rows[m.selected].Header
+}
+
+func (m *attachModel) selectedOrEnclosingSection() *section {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return nil
+	}
+	if rows[m.selected].Header != nil {
+		return rows[m.selected].Header
+	}
+	for index := m.selected; index >= 0; index-- {
+		if rows[index].Header != nil {
+			return rows[index].Header
+		}
+	}
+	return nil
+}
+
+func (m *attachModel) selectedIdentity() (string, bool) {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return "", false
+	}
+	row := rows[m.selected]
+	if row.Header != nil {
+		return row.Header.Name, true
+	}
+	if row.Member != nil {
+		return row.Member.Name, false
+	}
+	return "", false
+}
+
+func (m *attachModel) restoreSelection(name string, header bool) {
+	if name != "" {
+		if header {
+			if m.selectHeader(name) {
+				return
+			}
+		} else if m.selectByName(name) || m.selectCollapsedSectionForMember(name) {
+			return
+		}
+	}
+	m.selectFirstService()
+}
+
+func (m *attachModel) selectByName(name string) bool {
+	for index, row := range m.rows() {
+		if row.Member != nil && row.Member.Name == name {
+			m.selected = index
+			return true
+		}
+	}
+	return false
+}
+
+func (m *attachModel) selectHeader(name string) bool {
+	for index, row := range m.rows() {
+		if row.Header != nil && row.Header.Name == name {
+			m.selected = index
+			return true
+		}
+	}
+	return false
+}
+
+func (m *attachModel) selectCollapsedSectionForMember(name string) bool {
+	for _, current := range m.sections() {
+		if !m.collapsed[current.Name] {
+			continue
+		}
+		for _, members := range [][]sectionMember{current.Services, current.Tasks} {
+			for _, member := range members {
+				if member.Name == name {
+					return m.selectHeader(current.Name)
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *attachModel) selectFirstService() {
+	for _, current := range m.sections() {
+		if len(current.Services) == 0 {
+			continue
+		}
+		for _, member := range current.Services {
+			if m.selectByName(member.Name) || m.selectCollapsedSectionForMember(member.Name) {
+				return
+			}
+		}
+	}
+	rows := m.rows()
+	if len(rows) == 0 {
+		m.selected = -1
+	} else {
+		m.selected = 0
+	}
+}
+
+func (m *attachModel) foldSelectedSection(collapsed bool) {
+	current := m.selectedOrEnclosingSection()
+	if current == nil {
+		return
+	}
+	if m.collapsed == nil {
+		m.collapsed = make(map[string]bool)
+	}
+	m.collapsed[current.Name] = collapsed
+	m.persistCollapsedState()
+	if collapsed {
+		m.selectHeader(current.Name)
+	}
+	m.resetLogs()
+}
+
+func (m *attachModel) persistCollapsedState() error {
+	if m.collapsedPathErr != nil {
+		m.statusText = "Collapsed state save failed: " + m.collapsedPathErr.Error()
+		return m.collapsedPathErr
+	}
+	if m.collapsedPath == "" {
+		err := fmt.Errorf("collapsed state path is unavailable")
+		m.statusText = "Collapsed state save failed: " + err.Error()
+		return err
+	}
+	if err := saveCollapsed(m.collapsedPath, m.collapsed, m.sections()); err != nil {
+		m.statusText = "Collapsed state save failed: " + err.Error()
+		return err
+	}
+	return nil
+}
+
+func (m *attachModel) toggleSection(current *section) {
+	if current == nil {
+		return
+	}
+	if m.collapsed == nil {
+		m.collapsed = make(map[string]bool)
+	}
+	m.collapsed[current.Name] = !m.collapsed[current.Name]
+	m.persistCollapsedState()
 }
 
 func (m *attachModel) postAction(action string) tea.Cmd {
@@ -170,6 +398,27 @@ func (m *attachModel) postAction(action string) tea.Cmd {
 			return attachStatusMsg(err.Error())
 		}
 		return attachStatusMsg(action + " sent")
+	}
+}
+
+func (m *attachModel) groupActionCmd(group, action string) tea.Cmd {
+	effectiveGroup := strings.TrimSpace(group)
+	if effectiveGroup == "Other" {
+		effectiveGroup = ""
+	}
+	return func() tea.Msg {
+		var resp struct {
+			OK       bool     `json:"ok"`
+			Error    string   `json:"error"`
+			Affected []string `json:"affected"`
+		}
+		if err := m.client.post("/v1/groups/"+action, map[string]string{"group": effectiveGroup}, &resp); err != nil {
+			if resp.Error != "" {
+				return attachStatusMsg(resp.Error)
+			}
+			return attachStatusMsg(err.Error())
+		}
+		return attachStatusMsg(fmt.Sprintf("%s sent to %d group members", action, len(resp.Affected)))
 	}
 }
 
@@ -226,37 +475,45 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachTickMsg:
 		return m, tea.Batch(m.pollSnap(), m.pollLogs(), m.tick())
 	case attachSnapMsg:
+		if msg.seq != m.snapshotSeq {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.pollErr = msg.err.Error()
 			return m, nil
 		}
 		m.pollErr = ""
-		prev := m.currentName()
+		firstSnapshot := !m.hasSnapshot
+		prev, prevHeader := "", false
+		if !firstSnapshot {
+			prev, prevHeader = m.selectedIdentity()
+		}
 		m.procs = msg.procs
+		m.hasSnapshot = true
 		if len(m.procs) == 0 {
 			m.selected = -1
+			m.resetLogs()
 			return m, nil
 		}
-		// Keep selection by name when possible.
-		found := false
-		for i, p := range m.procs {
-			if p.Name == prev {
-				m.selected = i
-				found = true
-				break
-			}
+		if firstSnapshot || prev == "" {
+			m.selectFirstService()
+		} else {
+			m.restoreSelection(prev, prevHeader)
 		}
-		if !found {
-			if m.selected < 0 || m.selected >= len(m.procs) {
-				m.selected = 0
-			}
+		current, currentHeader := m.selectedIdentity()
+		if current != prev || currentHeader != prevHeader {
+			m.resetLogs()
 		}
 	case attachLogsMsg:
-		if msg.err != nil {
-			m.pollErr = msg.err.Error()
+		requestMatches := m.logInFlight && msg.seq == m.logInFlightSeq
+		if requestMatches {
+			m.logInFlight = false
+		}
+		if !requestMatches || msg.name != m.currentName() || msg.generation != m.selectionGeneration {
 			return m, nil
 		}
-		if msg.name != m.currentName() {
+		if msg.err != nil {
+			m.pollErr = msg.err.Error()
 			return m, nil
 		}
 		if m.logName != msg.name {
@@ -273,7 +530,7 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logs = append([]string(nil), m.logs[len(m.logs)-maxLocal:]...)
 			}
 		}
-		if msg.next > 0 {
+		if msg.next > m.logNext {
 			m.logNext = msg.next
 		}
 		if m.follow {
@@ -295,19 +552,35 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resetLogs()
 			}
 		case "down", "j":
-			if m.selected+1 < len(m.procs) {
+			if m.selected+1 < len(m.rows()) {
 				m.selected++
 				m.resetLogs()
 			}
+		case "left", "h":
+			m.foldSelectedSection(true)
+		case "right", "l":
+			m.foldSelectedSection(false)
 		case "s":
+			if current := m.selectedSection(); current != nil {
+				return m, m.groupActionCmd(current.Name, "stop")
+			}
 			return m, m.postAction("stop")
 		case "enter":
+			if current := m.selectedSection(); current != nil {
+				return m, m.groupActionCmd(current.Name, "start")
+			}
 			return m, m.postAction("start")
 		case "r":
+			if current := m.selectedSection(); current != nil {
+				return m, m.groupActionCmd(current.Name, "restart")
+			}
 			return m, m.postAction("restart")
 		case "f":
 			return m, m.postAction("free-port")
 		case " ":
+			if current := m.selectedSection(); current != nil {
+				return m, m.groupActionCmd(current.Name, "mark")
+			}
 			return m, m.postAction("mark")
 		case "m":
 			return m, func() tea.Msg {
@@ -349,12 +622,26 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.logOffset >= max(0, len(m.logs)-m.visibleLines()) {
 				m.follow = true
 			}
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionPress && msg.X < m.leftWidth() && msg.Y >= 2 {
+				rows := m.rows()
+				index := msg.Y - 2
+				if index < len(rows) {
+					m.selected = index
+					if rows[index].Header != nil {
+						m.toggleSection(rows[index].Header)
+					} else {
+						m.resetLogs()
+					}
+				}
+			}
 		}
 	}
 	return m, nil
 }
 
 func (m *attachModel) resetLogs() {
+	m.selectionGeneration++
 	m.logs = nil
 	m.logNext = 0
 	m.logName = ""
@@ -418,6 +705,7 @@ func (m *attachModel) footerView() string {
 func (m *attachModel) helpView() string {
 	rows := [][2]string{
 		{"↑/k ↓/j", "select process"},
+		{"←/h →/l", "fold section"},
 		{"enter", "start"},
 		{"s", "stop"},
 		{"r", "restart"},
@@ -450,11 +738,29 @@ func (m *attachModel) processList() string {
 	b.WriteString(titleStyle.Render("Processes"))
 	b.WriteString(mutedStyle.Render(" · attached"))
 	b.WriteString("\n")
-	if len(m.procs) == 0 {
+	rows := m.rows()
+	if len(rows) == 0 {
 		b.WriteString(mutedStyle.Render("(none)"))
 		return b.String()
 	}
-	for i, p := range m.procs {
+	for i, row := range rows {
+		if row.Header != nil {
+			b.WriteString(formatSectionHeader(
+				row.Header.Name,
+				m.summarizeSection(row.Header),
+				m.collapsed[row.Header.Name],
+				i == m.selected,
+				max(1, m.leftWidth()-5),
+			))
+			if i+1 < len(rows) {
+				b.WriteByte('\n')
+			}
+			continue
+		}
+		if row.Member == nil || row.Member.Index < 0 || row.Member.Index >= len(m.procs) {
+			continue
+		}
+		p := m.procs[row.Member.Index]
 		status := p.Status
 		kind := ""
 		if status == "disabled" {
@@ -482,7 +788,7 @@ func (m *attachModel) processList() string {
 			contentWidth: max(1, m.leftWidth()-5),
 		})
 		b.WriteString(line)
-		if i+1 < len(m.procs) {
+		if i+1 < len(rows) {
 			b.WriteByte('\n')
 		}
 	}
@@ -491,13 +797,30 @@ func (m *attachModel) processList() string {
 
 func (m *attachModel) logView() string {
 	name := m.currentName()
+	currentSection := m.selectedSection()
 	title := name
+	if currentSection != nil {
+		title = currentSection.Name
+	}
 	if title == "" {
 		title = "logs"
 	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(truncate(title, max(10, m.width-m.leftWidth()-8))))
 	b.WriteString("\n")
+	if currentSection != nil {
+		summary := m.summarizeSection(currentSection)
+		parts := []string{fmt.Sprintf("%d/%d services running", summary.Running, summary.Total)}
+		if len(currentSection.Tasks) > 0 {
+			taskLabel := "tasks"
+			if len(currentSection.Tasks) == 1 {
+				taskLabel = "task"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s", len(currentSection.Tasks), taskLabel))
+		}
+		b.WriteString(mutedStyle.Render(strings.Join(parts, " · ")))
+		return b.String()
+	}
 
 	vis := m.visibleLines()
 	if len(m.logs) == 0 {

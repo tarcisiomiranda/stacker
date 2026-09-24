@@ -1,7 +1,7 @@
-last_updated: 2026-08-17
+last_updated: 2026-09-24
 
 domain: processes
-description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, live YAML reload, serve/attach, instance disambiguation, and terminal UI.
+description: Process configuration, lifecycle supervision, grouped terminal UI and web index/log sidebar with horizontal group-header dividers and `−/+` fold markers, implicit `Other` fallback, first-appearance ordering within service/task tiers, persisted web and attach section folding, session group picking with current-group highlighting, full-choice arrow/vi-key navigation, enter selection and digit shortcuts, group-aware mixed service/task ordering, web and control-plane actions (group action results list affected members under `affected`), log capture, CLI control plane, free-port, live YAML reload, serve/attach, and instance disambiguation.
 
 models:
   - name: Config
@@ -10,8 +10,16 @@ models:
     path: cmd/stacker/main.go
   - name: ProcessConfig
     path: cmd/stacker/main.go
+    fields:
+      - name: group
+        type: string
+        optional: true
   - name: TaskConfig
     path: cmd/stacker/main.go
+    fields:
+      - name: group
+        type: string
+        optional: true
   - name: byteSize
     path: cmd/stacker/main.go
   - name: logsOptions
@@ -24,10 +32,35 @@ models:
     path: cmd/stacker/main.go
   - name: Process
     path: cmd/stacker/main.go
+  - name: sectionMember
+    path: cmd/stacker/sections.go
+  - name: section
+    path: cmd/stacker/sections.go
+  - name: listRow
+    path: cmd/stacker/sections.go
+  - name: memberState
+    path: cmd/stacker/sections.go
+  - name: sectionSummary
+    path: cmd/stacker/sections.go
+  - name: CollapsedSectionState
+    path: cmd/stacker/uistate.go
+    fields:
+      - name: collapsed
+        type: string[]
+  - name: groupActionMsg
+    path: cmd/stacker/groups.go
   - name: InstanceState
     path: cmd/stacker/control.go
   - name: ProcessInfo
     path: cmd/stacker/control.go
+    fields:
+      - name: group
+        type: string
+        optional: true
+  - name: processRow
+    path: cmd/stacker/web.go
+  - name: webSectionView
+    path: cmd/stacker/web.go
   - name: instanceSummary
     path: cmd/stacker/instances.go
   - name: launchMode
@@ -57,6 +90,8 @@ rest:
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/mark
       path: cmd/stacker/control.go
+    - name: POST /v1/processes/{name}/group
+      path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/note
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/color
@@ -68,6 +103,8 @@ rest:
     - name: POST /v1/tasks/{process}/{task}
       path: cmd/stacker/control.go
     - name: POST /v1/mark-all
+      path: cmd/stacker/control.go
+    - name: POST /v1/groups/{action}
       path: cmd/stacker/control.go
     - name: POST /v1/order
       path: cmd/stacker/control.go
@@ -101,7 +138,11 @@ rest:
       path: cmd/stacker/web.go
     - name: POST /api/{name}/color
       path: cmd/stacker/web.go
+    - name: POST /api/{name}/group
+      path: cmd/stacker/web.go
     - name: POST /api/order
+      path: cmd/stacker/web.go
+    - name: POST /api/groups/{action}
       path: cmd/stacker/web.go
     - name: POST /api/highlight-errors
       path: cmd/stacker/web.go
@@ -112,17 +153,21 @@ frontend:
   pages: []
   hooks: []
   components:
-    - name: Process list panel
+    - name: Grouped session TUI list and folding
       path: cmd/stacker/main.go
+    - name: Session group picker with full-choice keyboard navigation and shortcuts
+      path: cmd/stacker/main.go
+    - name: Process group actions
+      path: cmd/stacker/groups.go
     - name: Log panel
       path: cmd/stacker/main.go
     - name: Help overlay
       path: cmd/stacker/main.go
-    - name: Attach TUI
+    - name: Grouped attach TUI list and folding
       path: cmd/stacker/attach.go
     - name: Instance picker TUI
       path: cmd/stacker/picker.go
-    - name: Web log viewer (index + logs page)
+    - name: Grouped web sidebar and fold state
       path: cmd/stacker/web.go
     - name: Shell completion scripts (bash, zsh, fish)
       path: cmd/stacker/completions

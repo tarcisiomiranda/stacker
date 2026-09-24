@@ -27,6 +27,7 @@ processes:
     graceful_timeout: 8s
     port: 8000
     color: "#0af"
+    group: application
     tasks:
       migrate: mise run migrate
       seed: python manage.py seed
@@ -61,8 +62,9 @@ Each key below `processes` is the process name displayed in the TUI. Names must 
 - `graceful_timeout`: optional positive Go duration such as `500ms`, `8s`, `2m`, or `1m30s`. Omission means `8s`.
 - `port`: optional TCP port (`1`–`65535`). When set, Stacker frees that port (terminates listeners) before every start/restart so a stray process left by an IDE/AI agent does not block the bind. Omission means no automatic free-port.
 - `color`: optional visual group marker rendered as a colored dot next to the process name in the TUI list and the web sidebar. Hex (`"#0af"`, `"#00aaff"`, quoted — `#` starts a YAML comment) or a CSS color name (`red`). Purely cosmetic; omission renders no dot. The running app can rewrite this field (TUI key `c` cycles a preset palette; the web viewer has a color selector); both persist the change to this YAML file preserving comments, so do not assume the file is static while Stacker runs.
+- `group`: optional trimmed label that groups this process with other services and standalone tasks. Omission or an empty value places it in the implicit `Other` section.
 - `tasks`: optional map of `name: command` one-shot commands (migrations, seeds, cache clears) **scoped to this process** — run on demand in the process's `cwd` with its inherited environment. Output streams into the process's log prefixed `[task <name>]`; the run does **not** change the process status, so a long-running `--reload` server keeps serving. Names and commands must be non-empty. Trigger a task from the TUI (`t` opens a picker), the web viewer (More ▾ → Tasks), or the CLI (`stacker run <process> <task>`). Use these for "run once, process, exit" commands tied to one service, instead of adding a second always-on process.
-- Do not add any other process fields.
+- Do not add process fields other than `command`, `cwd`, `autostart`, `graceful_timeout`, `port`, `color`, `group`, and `tasks`.
 
 ### Standalone tasks (root `tasks:`)
 
@@ -73,13 +75,29 @@ tasks:
   deploy:
     command: ./deploy.sh
     cwd: ./infra
+    group: operations
   backup-db:
     command: pg_dump app > backup.sql
 ```
 
-- Each standalone task has `command` (required, non-empty), optional `cwd` (resolved from the config dir; a missing one disables just this task, same as a process), and optional `color`.
+- Each standalone task has `command` (required, non-empty), optional `cwd` (resolved from the config dir; a missing one disables just this task, same as a process), optional `color`, and optional `group`.
 - A standalone task name must not clash with a process name.
-- Standalone tasks are pinned after the processes in the list; they are excluded from reorder (TUI `shift+↑/↓`, web drag) and their color is not runtime-editable.
+- Standalone tasks appear after services in each section; task-only sections follow sections containing services, and `Other` remains last. Task key order is preserved within each section. TUI `shift+↑/↓` reorders a task within its same-kind section, while web drag-and-drop can reorder it or move it between sections. Their color is not runtime-editable.
+- Do not add standalone-task fields other than `command`, `cwd`, `color`, and `group`.
+
+### Process groups
+
+Group names are trimmed labels shared by process entries and root-level standalone tasks. Entries with no group share the implicit `Other` section. Sections retain first-appearance order within two tiers: sections containing services first, then task-only sections; `Other` is always last. Within a section, services appear before standalone tasks, preserving their order from their respective YAML mappings. The `Other` header is hidden only when every entry is ungrouped; an explicit `group: Other` makes the section visible and shares it with ungrouped entries.
+
+In the session and attach TUIs, `←`/`h` folds the selected or enclosing section and `→`/`l` unfolds it; clicking a header toggles it. Fold state persists per config in Stacker's user cache. The web sidebar folds by section and remembers folds in browser local storage for that config.
+
+On a TUI section header, `Enter` starts, `s` stops, `r` restarts, and `Space` marks the section. Start/stop/restart apply to service members; marking applies to active services and standalone tasks. The web sidebar offers group Start/Stop/Restart buttons. Session TUI `g` opens a group picker with the current group or `none` highlighted; `↑/k` and `↓/j` navigate all choices, `enter` selects, `1`–`9` are shortcuts for the first nine groups, and `0` removes the group. The picker cannot create group names; web drag-and-drop can reorder entries or move them between sections. Session TUI section reordering stays within the service-bearing or task-only tier, keeps `Other` last, and member reordering stays within its same-kind section. Group and order edits are saved to `stacker.yml`.
+
+Group assignment routes are `POST /v1/processes/{name}/group` and `POST /api/{name}/group`, each with `{"group":"name"}` (an empty string removes the group). Group actions use `POST /v1/groups/{start|stop|restart|mark}` on the control plane and `POST /api/groups/{start|stop|restart}` in the web viewer, with `{"group":"name"}`; responses list affected members in `affected`.
+
+The web group-action route is selected for body-bearing `POST /api/groups/{action}` requests. A configured process named `groups` retains bodyless actions, `GET /api/groups/tail`, and its body-bearing `group`, `color`, and `task` actions.
+
+The CLI supports `stacker start --group <name>`, `stacker stop --group <name>`, and `stacker restart --group <name>` (also `-g` and `--group=<name>`). Group mode does not take a process name. `stacker list` includes a `GROUP` column (`-` for unassigned entries), and `list --json` includes `group` in records when assigned. Shell completion provides live group candidates after `--group`/`-g`; `stacker __complete groups` prints those names.
 
 ### Command formatting
 

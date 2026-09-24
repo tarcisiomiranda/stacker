@@ -88,6 +88,7 @@ type TaskConfig struct {
 	Command string `yaml:"command"`
 	Cwd     string `yaml:"cwd"`
 	Color   string `yaml:"color"`
+	Group   string `yaml:"group"`
 }
 
 type UIConfig struct {
@@ -219,6 +220,7 @@ type ProcessConfig struct {
 	// Color, when set, draws a colored dot next to the process name (TUI list
 	// and web sidebar) for visual grouping. Hex (#0af, #00aaff) or CSS name.
 	Color string `yaml:"color"`
+	Group string `yaml:"group"`
 	// Tasks are named one-shot commands (migrations, seeds, cache clears) run
 	// on demand in the process's working directory. They stream into the
 	// process log and do not affect its status: the service keeps running.
@@ -322,6 +324,12 @@ func (p *Process) Status() ProcessStatus {
 	return p.status
 }
 
+func (p *Process) Orphaned() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.orphaned
+}
+
 // cwdProblem reports why a working directory cannot be used, or "" when it is
 // a usable directory. Any problem disables only the entry that declares it:
 // one missing clone must not stop the rest of the workspace from starting.
@@ -379,8 +387,6 @@ func (p *Process) Unavailable() string {
 	return p.unavailable
 }
 
-// Color is the only Config field mutated at runtime (TUI `c` / web selector),
-// so reads and writes go through the mutex.
 func (p *Process) Color() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -391,6 +397,18 @@ func (p *Process) SetColor(c string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Config.Color = c
+}
+
+func (p *Process) Group() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Config.Group
+}
+
+func (p *Process) SetGroup(group string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Config.Group = group
 }
 
 // PID is the pid of the process group leader while the process is alive, and 0
@@ -746,13 +764,17 @@ func (p *Process) Mark() {
 
 func (p *Process) Restart(notify func()) {
 	go func() {
-		if err := p.Stop(notify); err != nil {
-			p.appendLog("[stacker] restart failed while stopping: " + err.Error())
-			notify()
-			return
-		}
-		_ = p.Start(notify)
+		_ = p.restart(notify)
 	}()
+}
+
+func (p *Process) restart(notify func()) error {
+	if err := p.Stop(notify); err != nil {
+		p.appendLog("[stacker] restart failed while stopping: " + err.Error())
+		notify()
+		return err
+	}
+	return p.Start(notify)
 }
 
 // TaskRunning reports whether the named one-shot task is currently executing.
@@ -887,16 +909,20 @@ type colorSavedMsg struct {
 type orderSavedMsg struct{ err error }
 
 type model struct {
-	cfg       Config
-	processes []*Process
-	selected  int
-	width     int
-	height    int
-	logOffset int
-	follow    bool
-	wrap      bool
-	showHelp  bool
-	showTasks bool
+	cfg           Config
+	processes     []*Process
+	selected      int
+	collapsed     map[string]bool
+	collapsedPath string
+	width         int
+	height        int
+	logOffset     int
+	follow        bool
+	wrap          bool
+	showHelp      bool
+	showTasks     bool
+	showGroups    bool
+	groupChoice   int
 
 	selecting bool
 	selStart  int
@@ -1000,6 +1026,7 @@ func newModel(cfg Config) *model {
 	m := &model{
 		cfg:       cfg,
 		selected:  -1,
+		collapsed: make(map[string]bool),
 		follow:    true,
 		wrap:      cfg.UI.WordWrap,
 		selStart:  -1,
@@ -1011,6 +1038,7 @@ func newModel(cfg Config) *model {
 	}
 	m.hlErr.Store(cfg.UI.HighlightErrors)
 	names := orderedNames(cfg)
+	selectedName := ""
 	for _, name := range names {
 		p := NewProcess(name, cfg.Processes[name], cfg.UI.MaxLogLines)
 		p.setLogLimits(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
@@ -1019,8 +1047,8 @@ func newModel(cfg Config) *model {
 			p.Disable(reason)
 		}
 		m.processes = append(m.processes, p)
-		if m.selected == -1 && cfg.Processes[name].Autostart && p.Unavailable() == "" {
-			m.selected = len(m.processes) - 1
+		if selectedName == "" && cfg.Processes[name].Autostart && p.Unavailable() == "" {
+			selectedName = name
 		}
 	}
 	m.numProcesses = len(m.processes)
@@ -1028,7 +1056,7 @@ func newModel(cfg Config) *model {
 	// Standalone one-shot tasks follow the processes, in YAML order.
 	for _, name := range orderedTaskNames(cfg) {
 		tc := cfg.Tasks[name]
-		p := NewProcess(name, ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color}, cfg.UI.MaxLogLines)
+		p := NewProcess(name, ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color, Group: tc.Group}, cfg.UI.MaxLogLines)
 		p.setLogLimits(cfg.UI.MaxLogLines, int64(cfg.UI.MaxLogBytes))
 		p.oneShot = true
 		p.detectErrors = cfg.UI.HighlightErrors
@@ -1038,8 +1066,11 @@ func newModel(cfg Config) *model {
 		m.processes = append(m.processes, p)
 	}
 
-	if m.selected == -1 && len(m.processes) > 0 {
-		m.selected = 0
+	if selectedName != "" {
+		m.selectByName(selectedName)
+	}
+	if m.selected < 0 {
+		m.selectFirstService()
 	}
 	return m
 }
@@ -1106,6 +1137,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollToBottom()
 		}
 		return m, m.waitRefresh()
+	case groupActionMsg:
+		m.updateGroupActionStatus(msg)
 	case orderSavedMsg:
 		if msg.err != nil {
 			m.statusText = "Order save failed: " + msg.err.Error()
@@ -1139,6 +1172,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusText = fmt.Sprintf("Color %s set on %s (saved to YAML)", msg.color, msg.name)
 		}
+	case groupSavedMsg:
+		m.updateGroupSavedStatus(msg)
 	case tea.KeyMsg:
 		// Help overlay swallows every key: first press closes it.
 		if m.showHelp {
@@ -1148,6 +1183,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Task picker: digits run a task, anything else closes it.
 		if m.showTasks {
 			return m, m.handleTaskKey(msg.String())
+		}
+		if m.showGroups {
+			return m, m.handleGroupKey(msg.String())
 		}
 		switch msg.String() {
 		case "q":
@@ -1163,23 +1201,39 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resetLogView()
 			}
 		case "down", "j":
-			if m.selected+1 < len(m.processes) {
+			if m.selected+1 < len(m.rows()) {
 				m.selected++
 				m.resetLogView()
 			}
+		case "left", "h":
+			m.foldSelectedSection(true)
+		case "right", "l":
+			m.foldSelectedSection(false)
 		case "s":
+			if section := m.selectedSection(); section != nil {
+				return m, m.groupActionCmd(section.Name, "stop")
+			}
 			if p := m.current(); p != nil {
 				go func() { _ = p.Stop(m.notify) }()
 			}
 		case "enter":
+			if section := m.selectedSection(); section != nil {
+				return m, m.groupActionCmd(section.Name, "start")
+			}
 			if p := m.current(); p != nil {
 				go func() { _ = p.Start(m.notify) }()
 			}
 		case "r":
+			if section := m.selectedSection(); section != nil {
+				return m, m.groupActionCmd(section.Name, "restart")
+			}
 			if p := m.current(); p != nil {
 				p.Restart(m.notify)
 			}
 		case " ":
+			if section := m.selectedSection(); section != nil {
+				return m, m.groupActionCmd(section.Name, "mark")
+			}
 			if p := m.current(); p != nil {
 				p.Mark()
 				m.notify()
@@ -1232,6 +1286,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "c":
 			return m, m.cycleColorCmd()
+		case "g":
+			m.openGroupPicker()
 		case "t":
 			if p := m.current(); p != nil {
 				if len(p.Config.Tasks) == 0 {
@@ -1284,10 +1340,19 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				line := m.mouseLogLine(msg.Y)
 				m.selecting = true
 				m.selStart, m.selEnd = line, line
-			} else if msg.X < leftWidth && msg.Y > 0 {
-				idx := msg.Y - 2
-				if idx >= 0 && idx < len(m.processes) {
+			} else if msg.X < leftWidth {
+				rows := m.rows()
+				if len(rows) > 0 {
+					idx := clamp(msg.Y-2, 0, len(rows)-1)
 					m.selected = idx
+					if rows[idx].Header != nil {
+						if m.collapsed == nil {
+							m.collapsed = make(map[string]bool)
+						}
+						name := rows[idx].Header.Name
+						m.collapsed[name] = !m.collapsed[name]
+						m.persistCollapsedState()
+					}
 					m.resetLogView()
 				}
 			}
@@ -1329,6 +1394,9 @@ func (m *model) View() string {
 	}
 	if m.showTasks {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.tasksView())
+	}
+	if m.showGroups {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.groupsView())
 	}
 
 	left := panelStyle.Width(leftWidth - 3).Height(bodyHeight - 2).Render(m.processList())
@@ -1401,6 +1469,16 @@ func (m *model) helpView() string {
 				{"i", "run install task (if configured)"},
 				{"b", "run build task (if configured)"},
 				{"c", "cycle color (saved to YAML)"},
+			},
+		},
+		{
+			title: "Sections",
+			rows: [][2]string{
+				{"←/h →/l", "collapse / expand selected section"},
+				{"g", "pick group (↑/k ↓/j, enter, 1–9, 0)"},
+				{"mouse", "click a header to fold; click a member to select"},
+				{"enter/s/r/space", "on a header, act on the whole section"},
+				{"shift+↑/↓", "header moves section; member moves within its section"},
 			},
 		},
 		{
@@ -1561,33 +1639,104 @@ func (m *model) processList() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Processes"))
 	b.WriteString("\n")
-	for i, p := range m.processes {
-		processStatus := p.Status()
-		status := oneShotStatusLabel(p, processStatus)
-		errs := p.Errors()
-		if errs > 0 && processStatus != StatusFailed && processStatus != StatusDisabled {
-			status += "!"
+	procs := m.procs()
+	rows := m.rowsFor(procs)
+	for i, row := range rows {
+		if row.Header != nil {
+			summary := summarizeProcessSection(row.Header, procs)
+			b.WriteString(formatSectionHeader(
+				row.Header.Name,
+				summary,
+				m.collapsed[row.Header.Name],
+				i == m.selected,
+				max(1, m.leftWidth()-5),
+			))
+		} else if row.Member != nil && row.Member.Index >= 0 && row.Member.Index < len(procs) {
+			p := procs[row.Member.Index]
+			processStatus := p.Status()
+			status := oneShotStatusLabel(p, processStatus)
+			errs := p.Errors()
+			if errs > 0 && processStatus != StatusFailed && processStatus != StatusDisabled {
+				status += "!"
+			}
+			name := sanitizeLogLine(p.Name)
+			if p.orphaned {
+				name = name + " ⚠"
+			}
+			line := formatProcessListLine(processListLine{
+				name:         name,
+				status:       status,
+				statusKind:   processStatusKind(processStatus, errs),
+				color:        p.Color(),
+				oneShot:      p.oneShot,
+				hasTasks:     len(p.Config.Tasks) > 0,
+				selected:     i == m.selected,
+				contentWidth: max(1, m.leftWidth()-5),
+			})
+			b.WriteString(line)
 		}
-		name := sanitizeLogLine(p.Name)
-		if p.orphaned {
-			name = name + " ⚠"
-		}
-		line := formatProcessListLine(processListLine{
-			name:         name,
-			status:       status,
-			statusKind:   processStatusKind(processStatus, errs),
-			color:        p.Color(),
-			oneShot:      p.oneShot,
-			hasTasks:     len(p.Config.Tasks) > 0,
-			selected:     i == m.selected,
-			contentWidth: max(1, m.leftWidth()-5),
-		})
-		b.WriteString(line)
-		if i+1 < len(m.processes) {
+		if i+1 < len(rows) {
 			b.WriteByte('\n')
 		}
 	}
 	return b.String()
+}
+
+func summarizeProcessSection(current *section, procs []*Process) sectionSummary {
+	states := make([]memberState, 0, len(current.Services)+len(current.Tasks))
+	for _, members := range [][]sectionMember{current.Services, current.Tasks} {
+		for _, member := range members {
+			if member.Index < 0 || member.Index >= len(procs) {
+				continue
+			}
+			process := procs[member.Index]
+			states = append(states, memberState{
+				Status:  process.Status(),
+				Errors:  process.Errors(),
+				OneShot: member.OneShot,
+			})
+		}
+	}
+	return summarizeSection(states)
+}
+
+func formatSectionHeader(name string, summary sectionSummary, collapsed, selected bool, contentWidth int) string {
+	contentWidth = max(1, contentWidth)
+	glyph := "−"
+	if collapsed {
+		glyph = "+"
+	}
+	left := "─ " + glyph + " " + sanitizeLogLine(name)
+	right := ""
+	if summary.Total > 0 {
+		right = fmt.Sprintf("%d/%d", summary.Running, summary.Total)
+	}
+	if summary.State == "error" {
+		right += "!"
+	}
+	if ansi.StringWidth(right) >= contentWidth {
+		right = truncate(right, max(0, contentWidth-1))
+	}
+	rightWidth := ansi.StringWidth(right)
+	left = truncate(left, max(1, contentWidth-rightWidth-3))
+	gapWidth := contentWidth - ansi.StringWidth(left) - rightWidth
+	plain := left + right
+	if gapWidth >= 2 {
+		plain = left + " " + strings.Repeat("─", gapWidth-2) + " " + right
+	}
+	if selected {
+		return selectedProcessStyle.Render(plain)
+	}
+	switch summary.State {
+	case "error":
+		return errorBadgeStyle.Render(plain)
+	case "failed":
+		return failedStyle.Render(plain)
+	case "running":
+		return runningStyle.Render(plain)
+	default:
+		return mutedStyle.Render(plain)
+	}
 }
 
 // processListLine is the input for one sidebar row (session + attach).
@@ -1688,6 +1837,17 @@ func oneShotStatusLabel(p *Process, status ProcessStatus) string {
 func (m *model) logView() string {
 	p := m.current()
 	if p == nil {
+		if section := m.selectedSection(); section != nil {
+			serviceLabel := "services"
+			if len(section.Services) == 1 {
+				serviceLabel = "service"
+			}
+			taskLabel := "tasks"
+			if len(section.Tasks) == 1 {
+				taskLabel = "task"
+			}
+			return fmt.Sprintf("Section: %s\n%d %s · %d %s", sanitizeLogLine(section.Name), len(section.Services), serviceLabel, len(section.Tasks), taskLabel)
+		}
 		return "No processes configured"
 	}
 	vis := m.visualLines(p.Logs(), m.logWidth())
@@ -1755,10 +1915,178 @@ func (m *model) totalVisualLines() int {
 }
 
 func (m *model) current() *Process {
-	if m.selected < 0 || m.selected >= len(m.processes) {
+	procs := m.procs()
+	rows := m.rowsFor(procs)
+	if m.selected < 0 || m.selected >= len(rows) {
 		return nil
 	}
-	return m.processes[m.selected]
+	member := rows[m.selected].Member
+	if member == nil || member.Index < 0 || member.Index >= len(procs) {
+		return nil
+	}
+	return procs[member.Index]
+}
+
+func (m *model) members() []sectionMember {
+	return sectionMembers(m.procs())
+}
+
+func (m *model) sections() []section {
+	return buildSections(m.members())
+}
+
+func (m *model) rows() []listRow {
+	return buildRows(m.sections(), m.collapsed)
+}
+
+func (m *model) rowsFor(procs []*Process) []listRow {
+	return buildRows(buildSections(sectionMembers(procs)), m.collapsed)
+}
+
+func sectionMembers(procs []*Process) []sectionMember {
+	members := make([]sectionMember, 0, len(procs))
+	for index, process := range procs {
+		members = append(members, sectionMember{
+			Name:     process.Name,
+			Group:    strings.TrimSpace(process.Group()),
+			OneShot:  process.oneShot,
+			Orphaned: process.Orphaned(),
+			Index:    index,
+		})
+	}
+	return members
+}
+
+func (m *model) selectedSection() *section {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return nil
+	}
+	return rows[m.selected].Header
+}
+
+func (m *model) selectedOrEnclosingSection() *section {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return nil
+	}
+	if rows[m.selected].Header != nil {
+		return rows[m.selected].Header
+	}
+	for index := m.selected; index >= 0; index-- {
+		if rows[index].Header != nil {
+			return rows[index].Header
+		}
+	}
+	return nil
+}
+
+func (m *model) foldSelectedSection(collapsed bool) {
+	current := m.selectedOrEnclosingSection()
+	if current == nil {
+		return
+	}
+	name := current.Name
+	if m.collapsed == nil {
+		m.collapsed = make(map[string]bool)
+	}
+	m.collapsed[name] = collapsed
+	m.persistCollapsedState()
+	if collapsed {
+		m.selectHeader(name)
+	}
+	m.resetLogView()
+}
+
+func (m *model) persistCollapsedState() error {
+	if m.collapsedPath == "" {
+		return nil
+	}
+	if err := saveCollapsed(m.collapsedPath, m.collapsed, m.sections()); err != nil {
+		m.statusText = "Collapsed state save failed: " + err.Error()
+		return err
+	}
+	return nil
+}
+
+func (m *model) selectByName(name string) bool {
+	for index, row := range m.rows() {
+		if row.Member != nil && row.Member.Name == name {
+			m.selected = index
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) selectHeader(name string) bool {
+	for index, row := range m.rows() {
+		if row.Header != nil && row.Header.Name == name {
+			m.selected = index
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) selectedIdentity() (string, bool) {
+	rows := m.rows()
+	if m.selected < 0 || m.selected >= len(rows) {
+		return "", false
+	}
+	row := rows[m.selected]
+	if row.Header != nil {
+		return row.Header.Name, true
+	}
+	if row.Member != nil {
+		return row.Member.Name, false
+	}
+	return "", false
+}
+
+func (m *model) restoreSelection(name string, header bool) {
+	if name != "" {
+		if header {
+			if m.selectHeader(name) {
+				return
+			}
+		} else {
+			if m.selectByName(name) || m.selectCollapsedSectionForMember(name) {
+				return
+			}
+		}
+	}
+	m.selectFirstService()
+}
+
+func (m *model) selectCollapsedSectionForMember(name string) bool {
+	for _, current := range m.sections() {
+		if !m.collapsed[current.Name] {
+			continue
+		}
+		for _, members := range [][]sectionMember{current.Services, current.Tasks} {
+			for _, member := range members {
+				if member.Name == name {
+					return m.selectHeader(current.Name)
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *model) selectFirstService() {
+	rows := m.rows()
+	m.selected = -1
+	for index, row := range rows {
+		if row.Member != nil && !row.Member.OneShot {
+			m.selected = index
+			return
+		}
+	}
+	if len(rows) > 0 {
+		m.selected = 0
+	}
 }
 
 func (m *model) leftWidth() int {
@@ -1873,16 +2201,12 @@ func (m *model) copySelectionCmd() tea.Cmd {
 	}
 }
 
-// requestOrder is called by the web server: the reorder is applied by the
-// TUI goroutine on the next refresh, since it owns the selection index.
 func (m *model) requestOrder(names []string) {
 	m.pendingMu.Lock()
 	m.pendingOrder = names
 	m.pendingMu.Unlock()
 	m.notify()
 }
-
-// applyPendingOrder runs on the TUI goroutine (refreshMsg).
 func (m *model) applyPendingOrder() {
 	m.pendingMu.Lock()
 	names := m.pendingOrder
@@ -1891,65 +2215,219 @@ func (m *model) applyPendingOrder() {
 	if names == nil {
 		return
 	}
-	// Only the process prefix is reorderable; one-shot tasks stay pinned
-	// after it. names must be a permutation of the process names.
-	byName := make(map[string]*Process, m.numProcesses)
-	for _, p := range m.processes[:m.numProcesses] {
-		byName[p.Name] = p
-	}
-	reordered := make([]*Process, 0, m.numProcesses)
-	for _, name := range names {
-		if p := byName[name]; p != nil {
-			reordered = append(reordered, p)
-			delete(byName, name)
-		}
-	}
-	if len(reordered) != m.numProcesses {
+	services, tasks, ok := splitPendingOrder(m.procs(), names)
+	if !ok {
 		return
 	}
-	reordered = append(reordered, m.processes[m.numProcesses:]...)
-	selectedName := ""
-	if p := m.current(); p != nil {
-		selectedName = p.Name
-	}
-	m.procsMu.Lock()
-	m.processes = reordered
-	m.procsMu.Unlock()
-	for i, p := range reordered {
-		if p.Name == selectedName {
-			m.selected = i
-			break
-		}
-	}
+	m.applyProcessOrder(services, tasks)
 }
 
-// moveSelectedCmd moves the selected process up/down in the list and
-// persists the new order to the YAML config.
-func (m *model) moveSelectedCmd(delta int) tea.Cmd {
-	i := m.selected
-	j := i + delta
-	// One-shot tasks are pinned; reorder only within the process prefix.
-	if i < 0 || i >= m.numProcesses || j < 0 || j >= m.numProcesses {
-		if i >= m.numProcesses {
-			m.statusText = "Tasks can't be reordered"
-		}
-		return nil
+func splitPendingOrder(procs []*Process, names []string) ([]string, []string, bool) {
+	services, tasks := configuredProcessOrders(procs)
+	if samePermutation(services, names) {
+		return names, tasks, true
 	}
-	reordered := make([]*Process, len(m.processes))
-	copy(reordered, m.processes)
-	reordered[i], reordered[j] = reordered[j], reordered[i]
+	all := append(append([]string(nil), services...), tasks...)
+	if !samePermutation(all, names) {
+		return nil, nil, false
+	}
+	taskNames := make(map[string]bool, len(tasks))
+	for _, name := range tasks {
+		taskNames[name] = true
+	}
+	orderedServices := make([]string, 0, len(services))
+	orderedTasks := make([]string, 0, len(tasks))
+	for _, name := range names {
+		if taskNames[name] {
+			orderedTasks = append(orderedTasks, name)
+		} else {
+			orderedServices = append(orderedServices, name)
+		}
+	}
+	return orderedServices, orderedTasks, true
+}
+
+func configuredProcessOrders(procs []*Process) ([]string, []string) {
+	var services []string
+	var tasks []string
+	for _, process := range procs {
+		if process.Orphaned() {
+			continue
+		}
+		if process.oneShot {
+			tasks = append(tasks, process.Name)
+		} else {
+			services = append(services, process.Name)
+		}
+	}
+	return services, tasks
+}
+
+func reorderProcessStorage(procs []*Process, serviceNames, taskNames []string) ([]*Process, bool) {
+	configuredServices := make(map[string]*Process)
+	configuredTasks := make(map[string]*Process)
+	var orphanServices []*Process
+	var orphanTasks []*Process
+	for _, process := range procs {
+		orphaned := process.Orphaned()
+		switch {
+		case process.oneShot && orphaned:
+			orphanTasks = append(orphanTasks, process)
+		case process.oneShot:
+			configuredTasks[process.Name] = process
+		case orphaned:
+			orphanServices = append(orphanServices, process)
+		default:
+			configuredServices[process.Name] = process
+		}
+	}
+	currentServices, currentTasks := configuredProcessOrders(procs)
+	if !samePermutation(currentServices, serviceNames) || !samePermutation(currentTasks, taskNames) {
+		return nil, false
+	}
+	ordered := make([]*Process, 0, len(procs))
+	for _, name := range serviceNames {
+		ordered = append(ordered, configuredServices[name])
+	}
+	ordered = append(ordered, orphanServices...)
+	for _, name := range taskNames {
+		ordered = append(ordered, configuredTasks[name])
+	}
+	ordered = append(ordered, orphanTasks...)
+	return ordered, true
+}
+
+func (m *model) applyProcessOrder(serviceNames, taskNames []string) bool {
+	procs := m.procs()
+	reordered, ok := reorderProcessStorage(procs, serviceNames, taskNames)
+	if !ok {
+		return false
+	}
+	selectedName, selectedHeader := m.selectedIdentity()
 	m.procsMu.Lock()
 	m.processes = reordered
+	m.numProcesses = len(serviceNames)
 	m.procsMu.Unlock()
-	m.selected = j
-	names := make([]string, m.numProcesses)
-	for k := 0; k < m.numProcesses; k++ {
-		names[k] = reordered[k].Name
+	m.restoreSelection(selectedName, selectedHeader)
+	return true
+}
+
+func (m *model) moveSelectedCmd(delta int) tea.Cmd {
+	procs := m.procs()
+	sections := buildSections(sectionMembers(procs))
+	rows := buildRows(sections, m.collapsed)
+	if m.selected < 0 || m.selected >= len(rows) || (delta != -1 && delta != 1) {
+		return nil
+	}
+	oldServices, oldTasks := configuredProcessOrders(procs)
+	row := rows[m.selected]
+	if row.Header != nil {
+		sectionIndex := -1
+		for index := range sections {
+			if sections[index].Name == row.Header.Name {
+				sectionIndex = index
+				break
+			}
+		}
+		if refusal := sectionMoveRefusal(sections, sectionIndex, delta); refusal != "" {
+			m.statusText = refusal
+			return nil
+		}
+		targetIndex := sectionIndex + delta
+		sections[sectionIndex], sections[targetIndex] = sections[targetIndex], sections[sectionIndex]
+	} else if row.Member != nil {
+		member := *row.Member
+		if member.Orphaned {
+			m.statusText = "Orphaned entries can't be reordered"
+			return nil
+		}
+		sectionIndex, memberIndex := -1, -1
+		for index := range sections {
+			members := sections[index].Services
+			if member.OneShot {
+				members = sections[index].Tasks
+			}
+			for candidateIndex, candidate := range members {
+				if candidate.Index == member.Index {
+					sectionIndex, memberIndex = index, candidateIndex
+					break
+				}
+			}
+			if sectionIndex >= 0 {
+				break
+			}
+		}
+		if sectionIndex < 0 || memberIndex < 0 {
+			m.statusText = "Selected member can't be reordered"
+			return nil
+		}
+		members := sections[sectionIndex].Services
+		if member.OneShot {
+			members = sections[sectionIndex].Tasks
+		}
+		targetIndex := memberIndex + delta
+		if targetIndex < 0 || targetIndex >= len(members) {
+			m.statusText = "Member can't move outside its same-kind section members"
+			return nil
+		}
+		if members[targetIndex].Orphaned {
+			m.statusText = "Member can't move across an orphaned entry"
+			return nil
+		}
+		members[memberIndex], members[targetIndex] = members[targetIndex], members[memberIndex]
+		if member.OneShot {
+			sections[sectionIndex].Tasks = members
+		} else {
+			sections[sectionIndex].Services = members
+		}
+	} else {
+		return nil
+	}
+	serviceNames, taskNames := sectionDisplayOrder(sections)
+	if !m.applyProcessOrder(serviceNames, taskNames) {
+		m.statusText = "Order can't be represented by configured YAML entries"
+		return nil
+	}
+	return m.orderSaveCmd(oldServices, oldTasks, serviceNames, taskNames)
+}
+
+func (m *model) orderSaveCmd(oldServices, oldTasks, services, tasks []string) tea.Cmd {
+	type mappingOrder struct {
+		mapping string
+		names   []string
+	}
+	var changes []mappingOrder
+	if len(services) > 0 && !equalNames(oldServices, services) {
+		changes = append(changes, mappingOrder{mapping: "processes", names: append([]string(nil), services...)})
+	}
+	if len(tasks) > 0 && !equalNames(oldTasks, tasks) {
+		changes = append(changes, mappingOrder{mapping: "tasks", names: append([]string(nil), tasks...)})
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 	path := m.configPath
 	return func() tea.Msg {
-		return orderSavedMsg{err: updateConfigOrder(path, names)}
+		var failures []error
+		for _, change := range changes {
+			if err := updateConfigOrder(path, change.mapping, change.names); err != nil {
+				failures = append(failures, err)
+			}
+		}
+		return orderSavedMsg{err: errors.Join(failures...)}
 	}
+}
+
+func equalNames(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // colorPresets is the palette the TUI `c` key cycles through and the web
@@ -2069,6 +2547,7 @@ func loadConfig(path string) (Config, error) {
 	}
 	cfg.unavailable = make(map[string]string)
 	for name, processCfg := range cfg.Processes {
+		processCfg.Group = strings.TrimSpace(processCfg.Group)
 		if strings.TrimSpace(name) == "" {
 			return Config{}, errors.New("process name cannot be empty")
 		}
@@ -2113,6 +2592,7 @@ func loadConfig(path string) (Config, error) {
 
 	// Standalone one-shot tasks (root-level `tasks:`).
 	for name, taskCfg := range cfg.Tasks {
+		taskCfg.Group = strings.TrimSpace(taskCfg.Group)
 		if strings.TrimSpace(name) == "" {
 			return Config{}, errors.New("task name cannot be empty")
 		}
@@ -2217,6 +2697,7 @@ func runSession(configPath string) int {
 
 	m := newModel(cfg)
 	m.mode = "session"
+	selectedName, selectedHeader := m.selectedIdentity()
 	// Another supervisor may already hold ports this config declares; free-port
 	// would terminate those listeners without this heads-up.
 	m.statusText = joinNotices(otherInstancesNotice(configPath, cfg), disabledNotice(cfg))
@@ -2227,6 +2708,13 @@ func runSession(configPath string) int {
 	}
 	defer control.Close()
 	m.configPath = control.config
+	if statePath, stateErr := uiStatePath(m.configPath); stateErr == nil {
+		m.collapsedPath = statePath
+		m.collapsed = loadCollapsedOrEmpty(statePath)
+	} else {
+		m.collapsed = make(map[string]bool)
+	}
+	m.restoreSelection(selectedName, selectedHeader)
 	m.startConfigWatcher()
 	defer m.stopConfigWatcher()
 

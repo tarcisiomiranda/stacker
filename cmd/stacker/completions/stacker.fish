@@ -43,7 +43,7 @@ function __stacker_positionals
 	set -l index 2
 	while test $index -le (count $tokens)
 		switch $tokens[$index]
-			case '--config' '-config' '-n' '--tail' '--lines' '--since'
+			case '--config' '-config' '-n' '--tail' '--lines' '--since' '--group' '-g'
 				set index (math $index + 1)
 			case '-*'
 			case '*'
@@ -115,6 +115,7 @@ complete -c stacker -n '__stacker_wants_shell' -a '(__stacker_complete shells)'
 
 complete -c stacker -l config -r -F -d 'Path to stacker.yml'
 complete -c stacker -l json -d 'Machine-readable output'
+complete -c stacker -n '__stacker_command_is start stop restart' -s g -l group -r -a '(__stacker_complete groups)' -d 'Select a process group'
 
 # Log flags, offered only where they mean something.
 complete -c stacker -n '__stacker_command_is logs log' \

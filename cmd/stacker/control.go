@@ -40,6 +40,7 @@ type ProcessInfo struct {
 	PID      int      `json:"pid,omitempty"`
 	Port     int      `json:"port,omitempty"`
 	Color    string   `json:"color,omitempty"`
+	Group    string   `json:"group,omitempty"`
 	Errors   int      `json:"errors,omitempty"`
 	Tasks    []string `json:"tasks,omitempty"`
 	OneShot  bool     `json:"one_shot,omitempty"`
@@ -53,6 +54,8 @@ type controlServer struct {
 	server    *http.Server
 	listener  net.Listener
 }
+
+var errOrphanedGroupMutation = errors.New("orphaned entries can't change groups")
 
 func runtimeDir() (string, error) {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
@@ -224,6 +227,7 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 	mux.HandleFunc("/v1/ping", cs.handlePing)
 	mux.HandleFunc("/v1/processes", cs.handleProcesses)
 	mux.HandleFunc("/v1/processes/", cs.handleProcessAction)
+	mux.HandleFunc("/v1/groups/", cs.handleGroups)
 	mux.HandleFunc("/v1/free-port", cs.handleFreePort)
 	mux.HandleFunc("/v1/tasks/", cs.handleTaskAction)
 	mux.HandleFunc("/v1/mark-all", cs.handleMarkAll)
@@ -304,7 +308,7 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 	path := strings.TrimPrefix(r.URL.Path, "/v1/processes/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		http.Error(w, "expected /v1/processes/{name}/{start|stop|restart|status|logs|mark|color|free-port}", http.StatusBadRequest)
+		http.Error(w, "expected /v1/processes/{name}/{start|stop|restart|status|logs|mark|color|group|free-port}", http.StatusBadRequest)
 		return
 	}
 	name, err := url.PathUnescape(parts[0])
@@ -446,9 +450,64 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 		p.SetColor(color)
 		cs.m.notify()
 		writeJSON(w, map[string]any{"ok": true, "color": color})
+	case "group":
+		var body struct {
+			Group string `json:"group"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		group := strings.TrimSpace(body.Group)
+		p, err = cs.m.setConfiguredGroup(cs.config, p.Name, group)
+		if err != nil {
+			writeConfiguredGroupError(w, err)
+			return
+		}
+		cs.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "process": processInfo(p)})
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 	}
+}
+
+func (cs *controlServer) handleGroups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/v1/groups/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 1 || parts[0] == "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "expected /v1/groups/{start|stop|restart|mark}"})
+		return
+	}
+	action := parts[0]
+	if action != "start" && action != "stop" && action != "restart" && action != "mark" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("unknown group action %q", action)})
+		return
+	}
+	var body struct {
+		Group string `json:"group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+		return
+	}
+	group := strings.TrimSpace(body.Group)
+	if group == "" {
+		group = "Other"
+	}
+	names, err := cs.m.groupAction(group, action)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.HasPrefix(err.Error(), "unknown group ") {
+			status = http.StatusNotFound
+		}
+		writeJSONStatus(w, status, map[string]any{"ok": false, "group": group, "action": action, "affected": names, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "group": group, "action": action, "affected": names})
 }
 
 func (cs *controlServer) handleMarkAll(w http.ResponseWriter, r *http.Request) {
@@ -471,12 +530,103 @@ func (cs *controlServer) handleOrder(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
 		return
 	}
-	if err := updateConfigOrder(cs.config, body.Names); err != nil {
+	services, tasks, mixed, err := validateConfiguredOrder(cs.m.procs(), cs.config, body.Names)
+	if err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	if err := updateConfigOrder(cs.config, "processes", services); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if mixed {
+		if err := updateConfigOrder(cs.config, "tasks", tasks); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
 	cs.m.requestOrder(body.Names)
 	writeJSON(w, map[string]any{"ok": true, "order": body.Names})
+}
+
+func (m *model) setConfiguredGroup(configPath, name, group string) (*Process, error) {
+	m.procsMu.Lock()
+	defer m.procsMu.Unlock()
+
+	var process *Process
+	for _, candidate := range m.processes {
+		if candidate.Name == name {
+			process = candidate
+			break
+		}
+	}
+	if process == nil {
+		return nil, fmt.Errorf("unknown process %q", name)
+	}
+	process.mu.Lock()
+	orphaned := process.orphaned
+	process.mu.Unlock()
+	if orphaned {
+		return nil, errOrphanedGroupMutation
+	}
+
+	if process.oneShot {
+		task, exists := m.cfg.Tasks[name]
+		if !exists {
+			return nil, fmt.Errorf("unknown task %q", name)
+		}
+		if err := updateConfigField(configPath, "tasks", name, "group", group); err != nil {
+			return nil, err
+		}
+		task.Group = group
+		m.cfg.Tasks[name] = task
+	} else {
+		configured, exists := m.cfg.Processes[name]
+		if !exists {
+			return nil, fmt.Errorf("unknown process %q", name)
+		}
+		if err := updateConfigField(configPath, "processes", name, "group", group); err != nil {
+			return nil, err
+		}
+		configured.Group = group
+		m.cfg.Processes[name] = configured
+	}
+	process.SetGroup(group)
+	return process, nil
+}
+
+func writeConfiguredGroupError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, errOrphanedGroupMutation):
+		status = http.StatusBadRequest
+	case strings.HasPrefix(err.Error(), "unknown process "), strings.HasPrefix(err.Error(), "unknown task "):
+		status = http.StatusNotFound
+	}
+	writeJSONStatus(w, status, map[string]any{"ok": false, "error": err.Error()})
+}
+
+func validateConfiguredOrder(procs []*Process, configPath string, names []string) ([]string, []string, bool, error) {
+	services, tasks, ok := splitPendingOrder(procs, names)
+	if !ok {
+		return nil, nil, false, errors.New("order must be a permutation of configured non-orphan members")
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	configuredServices := orderedNames(cfg)
+	if !samePermutation(configuredServices, services) {
+		return nil, nil, false, fmt.Errorf("order %v is not a permutation of processes %v", services, configuredServices)
+	}
+	mixed := len(names) != len(services)
+	if mixed {
+		configuredTasks := orderedTaskNames(cfg)
+		if !samePermutation(configuredTasks, tasks) {
+			return nil, nil, false, fmt.Errorf("order %v is not a permutation of tasks %v", tasks, configuredTasks)
+		}
+	}
+	return services, tasks, mixed, nil
 }
 
 func (cs *controlServer) handleHighlightErrors(w http.ResponseWriter, r *http.Request) {
@@ -648,10 +798,11 @@ func processInfo(p *Process) ProcessInfo {
 		PID:      p.PID(),
 		Port:     p.Config.Port,
 		Color:    p.Color(),
+		Group:    p.Group(),
 		Errors:   p.Errors(),
 		Tasks:    sortedTaskNames(p.Config.Tasks),
 		OneShot:  p.oneShot,
-		Orphaned: p.orphaned,
+		Orphaned: p.Orphaned(),
 	}
 }
 

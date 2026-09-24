@@ -242,12 +242,15 @@ func (ws *webServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	sections, grouped := ws.sectionViews("")
 	_ = indexTemplate.Execute(w, map[string]any{
 		"Config":         ws.config,
 		"ConfigLabel":    configLabel(ws.config, 1),
 		"OtherInstances": ws.otherInstanceCount(),
 		"Processes":      ws.processRows(""),
 		"Tasks":          ws.taskRows(""),
+		"Sections":       sections,
+		"Grouped":        grouped,
 	})
 }
 
@@ -271,9 +274,22 @@ type processRow struct {
 	NameEscaped string
 	Status      string
 	Color       string
+	Group       string
 	Errors      int
 	Current     bool
 	IsTask      bool
+	Orphaned    bool
+}
+
+type webSectionView struct {
+	Name       string
+	GroupValue string
+	Implicit   bool
+	Running    int
+	Total      int
+	State      string
+	Services   []processRow
+	Tasks      []processRow
 }
 
 // processRows returns the service processes; taskRows returns the standalone
@@ -293,17 +309,63 @@ func (ws *webServer) rows(current string, tasks bool) []processRow {
 		if p.oneShot != tasks {
 			continue
 		}
-		rows = append(rows, processRow{
-			Name:        p.Name,
-			NameEscaped: url.PathEscape(p.Name),
-			Status:      oneShotStatusLabel(p, p.Status()),
-			Color:       p.Color(),
-			Errors:      p.Errors(),
-			Current:     p.Name == current,
-			IsTask:      p.oneShot,
-		})
+		rows = append(rows, webProcessRow(p, current))
 	}
 	return rows
+}
+
+func (ws *webServer) sectionViews(current string) ([]webSectionView, bool) {
+	procs := ws.m.procs()
+	sections := buildSections(sectionMembers(procs))
+	views := make([]webSectionView, 0, len(sections))
+	grouped := false
+	for _, currentSection := range sections {
+		if !currentSection.Implicit {
+			grouped = true
+		}
+		groupValue := currentSection.Name
+		if currentSection.Name == "Other" || currentSection.Implicit {
+			groupValue = ""
+		}
+		states := make([]memberState, 0, len(currentSection.Services)+len(currentSection.Tasks))
+		view := webSectionView{
+			Name:       currentSection.Name,
+			GroupValue: groupValue,
+			Implicit:   currentSection.Implicit,
+			Services:   make([]processRow, 0, len(currentSection.Services)),
+			Tasks:      make([]processRow, 0, len(currentSection.Tasks)),
+		}
+		for _, member := range currentSection.Services {
+			process := procs[member.Index]
+			view.Services = append(view.Services, webProcessRow(process, current))
+			states = append(states, memberState{Status: process.Status(), Errors: process.Errors()})
+		}
+		for _, member := range currentSection.Tasks {
+			process := procs[member.Index]
+			view.Tasks = append(view.Tasks, webProcessRow(process, current))
+			states = append(states, memberState{Status: process.Status(), Errors: process.Errors(), OneShot: true})
+		}
+		summary := summarizeSection(states)
+		view.Running = summary.Running
+		view.Total = summary.Total
+		view.State = summary.State
+		views = append(views, view)
+	}
+	return views, grouped
+}
+
+func webProcessRow(process *Process, current string) processRow {
+	return processRow{
+		Name:        process.Name,
+		NameEscaped: url.PathEscape(process.Name),
+		Status:      oneShotStatusLabel(process, process.Status()),
+		Color:       process.Color(),
+		Group:       process.Group(),
+		Errors:      process.Errors(),
+		Current:     process.Name == current,
+		IsTask:      process.oneShot,
+		Orphaned:    process.Orphaned(),
+	}
 }
 
 func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
@@ -329,6 +391,7 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 	// TailLogs(0) gives lines and the next offset in one consistent snapshot.
 	_, lines, next := p.TailLogs(0)
 	logs := strings.Join(lines, "\n")
+	sections, grouped := ws.sectionViews(p.Name)
 
 	if len(parts) == 2 {
 		if parts[1] != "raw" {
@@ -361,6 +424,8 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 		"WordWrap":        ws.m.cfg.UI.WordWrap,
 		"HighlightErrors": ws.m.hlErr.Load(),
 		"Processes":       ws.processRows(p.Name),
+		"Sections":        sections,
+		"Grouped":         grouped,
 	})
 }
 
@@ -369,6 +434,16 @@ func (ws *webServer) handleLogsPage(w http.ResponseWriter, r *http.Request) {
 // POST /api/{name}/{start|stop|restart|mark}
 func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
+	if (trimmed == "groups" || strings.HasPrefix(trimmed, "groups/")) && r.Method == http.MethodPost {
+		action := strings.Trim(strings.TrimPrefix(trimmed, "groups"), "/")
+		processBodyAction := action == "group" || action == "color" || action == "task"
+		hasBody := requestHasBody(r)
+		missingProcess := ws.m.processByName("groups") == nil
+		if !processBodyAction && (hasBody || missingProcess) {
+			ws.handleGroupAction(w, r, strings.TrimPrefix(trimmed, "groups"))
+			return
+		}
+	}
 	// Global action: POST /api/mark-all marks every running process.
 	if trimmed == "mark-all" {
 		if r.Method != http.MethodPost {
@@ -393,9 +468,20 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
 			return
 		}
-		if err := updateConfigOrder(ws.config, body.Names); err != nil {
+		services, tasks, mixed, err := validateConfiguredOrder(ws.m.procs(), ws.config, body.Names)
+		if err != nil {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
+		}
+		if err := updateConfigOrder(ws.config, "processes", services); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if mixed {
+			if err := updateConfigOrder(ws.config, "tasks", tasks); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
 		}
 		ws.m.requestOrder(body.Names)
 		writeJSON(w, map[string]any{"ok": true, "order": body.Names})
@@ -499,6 +585,23 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "color": color})
 		return
 	}
+	if parts[1] == "group" {
+		var body struct {
+			Group string `json:"group"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+			return
+		}
+		updated, err := ws.m.setConfiguredGroup(ws.config, p.Name, strings.TrimSpace(body.Group))
+		if err != nil {
+			writeConfiguredGroupError(w, err)
+			return
+		}
+		ws.m.notify()
+		writeJSON(w, map[string]any{"ok": true, "process": processInfo(updated)})
+		return
+	}
 
 	switch parts[1] {
 	case "start":
@@ -547,6 +650,48 @@ func (ws *webServer) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "process": processInfo(p)})
+}
+
+func requestHasBody(r *http.Request) bool {
+	return r.ContentLength > 0 || len(r.TransferEncoding) > 0 || r.ContentLength < 0 && r.Body != http.NoBody
+}
+
+func (ws *webServer) handleGroupAction(w http.ResponseWriter, r *http.Request, path string) {
+	if r.Method != http.MethodPost {
+		writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 1 || parts[0] == "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "expected /api/groups/{start|stop|restart}"})
+		return
+	}
+	action := parts[0]
+	if action != "start" && action != "stop" && action != "restart" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("unknown group action %q", action)})
+		return
+	}
+	var body struct {
+		Group string `json:"group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
+		return
+	}
+	group := strings.TrimSpace(body.Group)
+	if group == "" {
+		group = "Other"
+	}
+	names, err := ws.m.groupAction(group, action)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.HasPrefix(err.Error(), "unknown group ") {
+			status = http.StatusNotFound
+		}
+		writeJSONStatus(w, status, map[string]any{"ok": false, "group": group, "action": action, "affected": names, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "group": group, "action": action, "affected": names})
 }
 
 // webLogsURL builds the browser URL for a process's log page.

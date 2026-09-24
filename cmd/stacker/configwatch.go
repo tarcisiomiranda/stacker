@@ -136,10 +136,7 @@ func (m *model) applyConfigDiff(cfg Config) {
 		cfg.UI.WheelLines = 3
 	}
 
-	selectedName := ""
-	if p := m.current(); p != nil {
-		selectedName = p.Name
-	}
+	selectedName, selectedHeader := m.selectedIdentity()
 
 	oldByName := make(map[string]*Process, len(m.processes))
 	for _, p := range m.processes {
@@ -150,11 +147,11 @@ func (m *model) applyConfigDiff(cfg Config) {
 	m.hlErr.Store(hl)
 
 	var (
-		yamlProcs    []*Process
-		orphanSvcs   []*Process
-		yamlTasks    []*Process
-		orphanTasks  []*Process
-		toAutostart  []*Process
+		yamlProcs   []*Process
+		orphanSvcs  []*Process
+		yamlTasks   []*Process
+		orphanTasks []*Process
+		toAutostart []*Process
 	)
 
 	// --- Real processes (YAML order) ---
@@ -213,7 +210,7 @@ func (m *model) applyConfigDiff(cfg Config) {
 
 	for _, name := range orderedTaskNames(cfg) {
 		tc := cfg.Tasks[name]
-		pc := ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color}
+		pc := ProcessConfig{Command: tc.Command, Cwd: tc.Cwd, Color: tc.Color, Group: tc.Group}
 		if old, ok := oldByName[name]; ok && old.oneShot {
 			old.mu.Lock()
 			old.Config = pc
@@ -271,16 +268,7 @@ func (m *model) applyConfigDiff(cfg Config) {
 	m.cfg = cfg
 	m.procsMu.Unlock()
 
-	m.selected = -1
-	for i, p := range newProcs {
-		if p.Name == selectedName {
-			m.selected = i
-			break
-		}
-	}
-	if m.selected < 0 && len(newProcs) > 0 {
-		m.selected = 0
-	}
+	m.restoreSelection(selectedName, selectedHeader)
 
 	for _, p := range toAutostart {
 		go func(proc *Process) { _ = proc.Start(m.notify) }(p)
@@ -310,10 +298,7 @@ func applyAvailability(p *Process, reason string) {
 // eventually matches YAML after the user stops them.
 func (m *model) pruneOrphans() {
 	procs := m.procs()
-	selectedName := ""
-	if p := m.current(); p != nil {
-		selectedName = p.Name
-	}
+	selectedName, selectedHeader := m.selectedIdentity()
 
 	var (
 		yamlProcs   []*Process
@@ -358,16 +343,7 @@ func (m *model) pruneOrphans() {
 	m.numProcesses = len(yamlProcs)
 	m.procsMu.Unlock()
 
-	m.selected = -1
-	for i, p := range kept {
-		if p.Name == selectedName {
-			m.selected = i
-			break
-		}
-	}
-	if m.selected < 0 && len(kept) > 0 {
-		m.selected = 0
-	}
+	m.restoreSelection(selectedName, selectedHeader)
 }
 
 // stopConfigWatcher signals the poll loop to exit (best-effort).

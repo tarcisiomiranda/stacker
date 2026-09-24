@@ -115,6 +115,30 @@ var flagCompletions = map[string][][2]string{
 		{"--json", "Lines plus the next index"},
 		{"--config", "Path to stacker.yml"},
 	},
+	"start": {
+		{"--config", "Path to stacker.yml"},
+		{"--json", "Machine-readable output"},
+		{"--help", "Show help"},
+		{"--version", "Print the version"},
+		{"--group", "Select a process group"},
+		{"-g", "Select a process group"},
+	},
+	"stop": {
+		{"--config", "Path to stacker.yml"},
+		{"--json", "Machine-readable output"},
+		{"--help", "Show help"},
+		{"--version", "Print the version"},
+		{"--group", "Select a process group"},
+		{"-g", "Select a process group"},
+	},
+	"restart": {
+		{"--config", "Path to stacker.yml"},
+		{"--json", "Machine-readable output"},
+		{"--help", "Show help"},
+		{"--version", "Print the version"},
+		{"--group", "Select a process group"},
+		{"-g", "Select a process group"},
+	},
 	"serve": {
 		{"--background", "Daemonize the supervisor"},
 		{"--web", "Start the web log viewer too"},
@@ -161,6 +185,8 @@ func cliComplete(configPath string, args []string) int {
 		printCompletions(flags)
 	case "processes":
 		printCompletions(processCandidates(configPath, false))
+	case "groups":
+		printCompletions(groupCandidates(configPath))
 	case "tasks":
 		if len(args) < 2 {
 			return 0
@@ -235,7 +261,33 @@ func describeForCompletion(p ProcessInfo) string {
 	if p.Orphaned {
 		parts = append(parts, "removed from YAML")
 	}
+	if p.Group != "" {
+		parts = append(parts, p.Group)
+	}
 	return strings.Join(parts, " · ")
+}
+
+func groupCandidates(configPath string) [][2]string {
+	infos, err := completionProcesses(configPath)
+	if err != nil {
+		return nil
+	}
+	members := make([]sectionMember, 0, len(infos))
+	for index, process := range infos {
+		members = append(members, sectionMember{
+			Name:     process.Name,
+			Group:    process.Group,
+			OneShot:  process.OneShot,
+			Orphaned: process.Orphaned,
+			Index:    index,
+		})
+	}
+	sections := buildSections(members)
+	candidates := make([][2]string, 0, len(sections))
+	for _, current := range sections {
+		candidates = append(candidates, [2]string{current.Name, ""})
+	}
+	return candidates
 }
 
 func taskCandidates(configPath, process string) [][2]string {

@@ -51,6 +51,14 @@ func TestCompleteCommandsAndFlags(t *testing.T) {
 			t.Fatalf("logs flags missing %q:\n%s", want, out)
 		}
 	}
+	for _, command := range []string{"start", "stop", "restart"} {
+		actionFlags := captureStdout(t, func() { cliComplete("", []string{"flags", command}) })
+		for _, want := range []string{"--group\t", "-g\t"} {
+			if !strings.Contains(actionFlags, want) {
+				t.Fatalf("%s flags missing %q:\n%s", command, want, actionFlags)
+			}
+		}
+	}
 
 	// Aliases share the flags of the command they stand for.
 	alias := captureStdout(t, func() { cliComplete("", []string{"flags", "log"}) })
@@ -86,6 +94,48 @@ func TestCompleteProcessesFromLiveInstance(t *testing.T) {
 	}
 }
 
+func TestCompleteGroupsFromLiveInstance(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	cfgPath := startCompletionInstance(t)
+
+	out := captureStdout(t, func() {
+		if code := cliComplete(cfgPath, []string{"groups"}); code != 0 {
+			t.Fatalf("exit = %d", code)
+		}
+	})
+	if want := "hub\noperations\nOther\n"; out != want {
+		t.Fatalf("groups = %q, want %q", out, want)
+	}
+}
+
+func startCompletionInstance(t *testing.T) string {
+	t.Helper()
+	cfgPath := writeConfig(t, t.TempDir(), `
+version: 1
+processes:
+  api:
+    command: "true"
+    group: hub
+  worker:
+    command: "true"
+  scheduler:
+    command: "true"
+    group: operations
+`)
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	m := newModel(cfg)
+	m.mode = "serve"
+	cs, err := startControlServer(m, cfgPath)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(cs.Close)
+	return cfgPath
+}
+
 // A TAB press must never print an error or hang, however broken the setup is.
 func TestCompleteStaysSilentWithoutInstance(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -93,6 +143,7 @@ func TestCompleteStaysSilentWithoutInstance(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"processes"},
+		{"groups"},
 		{"tasks", "whatever"},
 		{"tasks"},
 		{"bogus-kind"},
@@ -116,6 +167,7 @@ func TestDescribeForCompletion(t *testing.T) {
 		want string
 	}{
 		{"running with port", ProcessInfo{Status: "running", Port: 3001}, "running · :3001"},
+		{"running with group", ProcessInfo{Status: "running", Group: "hub"}, "running · hub"},
 		{"plain stopped", ProcessInfo{Status: "stopped"}, "stopped"},
 		{
 			// "disabled" alone reads like a choice; say why it cannot run.

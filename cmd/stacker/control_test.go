@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -450,4 +452,366 @@ processes:
 		resp.Body.Close()
 		return false
 	})
+}
+
+func TestControlGroupSnapshotAndMutation(t *testing.T) {
+	m, cs, configPath := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+    group: hub
+tasks:
+  deploy:
+    command: true
+    group: release
+`)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + cs.listener.Addr().String() + "/v1/processes")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var list struct {
+		OK        bool `json:"ok"`
+		Processes []struct {
+			Name  string `json:"name"`
+			Group string `json:"group"`
+		} `json:"processes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode list: %v", err)
+	}
+	resp.Body.Close()
+	if !list.OK || len(list.Processes) != 2 || list.Processes[0].Group != "hub" || list.Processes[1].Group != "release" {
+		t.Fatalf("unexpected group snapshot: %+v", list)
+	}
+
+	for _, request := range []struct {
+		name  string
+		group string
+		want  string
+	}{
+		{name: "api", group: `{"group":"  release  "}`, want: "release"},
+		{name: "api", group: `{"group":" "}`, want: ""},
+		{name: "deploy", group: `{"group":"  deploy  "}`, want: "deploy"},
+		{name: "deploy", group: `{"group":""}`, want: ""},
+	} {
+		response, body := postControl(t, cs, "/v1/processes/"+request.name+"/group", request.group)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("set group for %s: status=%d body=%s", request.name, response.StatusCode, body)
+		}
+		process := m.processByName(request.name)
+		if process.Group() != request.want {
+			t.Fatalf("live group for %s = %q, want %q", request.name, process.Group(), request.want)
+		}
+		if request.name == "api" {
+			if m.cfg.Processes[request.name].Group != request.want {
+				t.Fatalf("live config group for %s = %q, want %q", request.name, m.cfg.Processes[request.name].Group, request.want)
+			}
+		} else if m.cfg.Tasks[request.name].Group != request.want {
+			t.Fatalf("live task group for %s = %q, want %q", request.name, m.cfg.Tasks[request.name].Group, request.want)
+		}
+		cfg, err := loadConfig(configPath)
+		if err != nil {
+			t.Fatalf("load updated config: %v", err)
+		}
+		got := cfg.Processes[request.name].Group
+		if request.name == "deploy" {
+			got = cfg.Tasks[request.name].Group
+		}
+		if got != request.want {
+			t.Fatalf("persisted group for %s = %q, want %q", request.name, got, request.want)
+		}
+	}
+
+	response, body := postControl(t, cs, "/v1/processes/api/group", `{"group":`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed group body: status=%d body=%s", response.StatusCode, body)
+	}
+}
+
+func TestControlGroupMutationRejectsOrphans(t *testing.T) {
+	m, cs, _ := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+    group: hub
+`)
+	process := m.processByName("api")
+	process.orphaned = true
+	response, body := postControl(t, cs, "/v1/processes/api/group", `{"group":"release"}`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("orphan group mutation: status=%d body=%s", response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "orphan") {
+		t.Fatalf("orphan group mutation response did not explain refusal: %s", body)
+	}
+	if process.Group() != "hub" {
+		t.Fatalf("orphan group changed to %q", process.Group())
+	}
+}
+
+func TestControlGroupActions(t *testing.T) {
+	m, cs, _ := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+    group: hub
+  worker:
+    command: true
+    group: hub
+  loose:
+    command: true
+tasks:
+  deploy:
+    command: true
+    group: hub
+  plain:
+    command: true
+`)
+	for _, name := range []string{"api", "worker", "deploy", "loose", "plain"} {
+		process := m.processByName(name)
+		process.mu.Lock()
+		process.status = StatusRunning
+		process.mu.Unlock()
+	}
+
+	response, body := postControl(t, cs, "/v1/groups/mark", `{"group":" hub "}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("mark hub: status=%d body=%s", response.StatusCode, body)
+	}
+	var marked struct {
+		OK       bool            `json:"ok"`
+		Affected []string        `json:"affected"`
+		Names    json.RawMessage `json:"names"`
+	}
+	if err := json.Unmarshal(body, &marked); err != nil {
+		t.Fatalf("decode mark response: %v", err)
+	}
+	if !marked.OK || !reflect.DeepEqual(marked.Affected, []string{"api", "worker", "deploy"}) || len(marked.Names) != 0 {
+		t.Fatalf("unexpected hub mark response: %+v", marked)
+	}
+	response, body = postControl(t, cs, "/v1/groups/mark", `{"group":""}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("mark Other: status=%d body=%s", response.StatusCode, body)
+	}
+	var otherMarked struct {
+		OK       bool            `json:"ok"`
+		Affected []string        `json:"affected"`
+		Names    json.RawMessage `json:"names"`
+	}
+	if err := json.Unmarshal(body, &otherMarked); err != nil {
+		t.Fatalf("decode Other mark response: %v", err)
+	}
+	if !otherMarked.OK || !reflect.DeepEqual(otherMarked.Affected, []string{"loose", "plain"}) || len(otherMarked.Names) != 0 {
+		t.Fatalf("unexpected Other mark response: %+v", otherMarked)
+	}
+
+	response, body = postControl(t, cs, "/v1/groups/mark", `{"group":"missing"}`)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown group: status=%d body=%s", response.StatusCode, body)
+	}
+	response, body = postControl(t, cs, "/v1/groups/unknown", `{"group":"hub"}`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid group action: status=%d body=%s", response.StatusCode, body)
+	}
+	response, body = postControl(t, cs, "/v1/groups/mark", `{"group":`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed group action: status=%d body=%s", response.StatusCode, body)
+	}
+}
+
+func TestControlGroupActionFailureResponse(t *testing.T) {
+	m, cs, _ := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+    group: hub
+`)
+	process := m.processByName("api")
+	process.mu.Lock()
+	process.Config.GracefulTimeout = "invalid"
+	process.status = StatusRunning
+	process.mu.Unlock()
+	response, body := postControl(t, cs, "/v1/groups/stop", `{"group":"hub"}`)
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("stop failure: status=%d body=%s", response.StatusCode, body)
+	}
+	var failed struct {
+		OK       bool            `json:"ok"`
+		Affected []string        `json:"affected"`
+		Names    json.RawMessage `json:"names"`
+		Error    string          `json:"error"`
+	}
+	if err := json.Unmarshal(body, &failed); err != nil {
+		t.Fatalf("decode failed group action: %v", err)
+	}
+	if failed.OK || failed.Error == "" || !reflect.DeepEqual(failed.Affected, []string{"api"}) || len(failed.Names) != 0 {
+		t.Fatalf("unexpected failed group action: %+v", failed)
+	}
+}
+
+func TestControlOrderMixedAndServiceOnly(t *testing.T) {
+	m, cs, configPath := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+  web:
+    command: true
+tasks:
+  deploy:
+    command: true
+  backup:
+    command: true
+`)
+	response, body := postControl(t, cs, "/v1/order", `{"names":["backup","deploy","web","api"]}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("mixed order: status=%d body=%s", response.StatusCode, body)
+	}
+	assertControlOrder(t, configPath, []string{"web", "api"}, []string{"backup", "deploy"})
+	m.applyPendingOrder()
+	services, tasks := configuredProcessOrders(m.procs())
+	if !reflect.DeepEqual(services, []string{"web", "api"}) || !reflect.DeepEqual(tasks, []string{"backup", "deploy"}) {
+		t.Fatalf("mixed pending order applied as services=%v tasks=%v", services, tasks)
+	}
+
+	response, body = postControl(t, cs, "/v1/order", `{"names":["api","web"]}`)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("service-only order: status=%d body=%s", response.StatusCode, body)
+	}
+	assertControlOrder(t, configPath, []string{"api", "web"}, []string{"backup", "deploy"})
+}
+
+func TestControlOrderRejectsUnknownOrphanAndInvalidPermutations(t *testing.T) {
+	m, cs, configPath := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+  web:
+    command: true
+tasks:
+  deploy:
+    command: true
+  backup:
+    command: true
+`)
+	m.processByName("web").orphaned = true
+	for _, names := range []string{
+		`["api","missing"]`,
+		`["api","web","deploy","backup"]`,
+		`["api","api"]`,
+		`["api","deploy"]`,
+	} {
+		before, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+		response, body := postControl(t, cs, "/v1/order", `{"names":`+names+`}`)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid order %s: status=%d body=%s", names, response.StatusCode, body)
+		}
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config after invalid order: %v", err)
+		}
+		if !reflect.DeepEqual(before, after) {
+			t.Fatalf("invalid order %s changed config", names)
+		}
+		m.pendingMu.Lock()
+		queued := m.pendingOrder != nil
+		m.pendingMu.Unlock()
+		if queued {
+			t.Fatalf("invalid order %s was queued", names)
+		}
+	}
+}
+
+func TestControlOrderValidatesBothMappingsBeforeWriting(t *testing.T) {
+	m, cs, configPath := startControlTest(t, `
+version: 1
+processes:
+  api:
+    command: true
+  web:
+    command: true
+tasks:
+  deploy:
+    command: true
+  backup:
+    command: true
+`)
+	if err := os.WriteFile(configPath, []byte("version: 1\nprocesses:\n  api:\n    command: true\n  web:\n    command: true\ntasks:\n  another:\n    command: true\n"), 0o600); err != nil {
+		t.Fatalf("rewrite config tasks: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	response, body := postControl(t, cs, "/v1/order", `{"names":["web","api","deploy","backup"]}`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mismatched task mapping: status=%d body=%s", response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "tasks") {
+		t.Fatalf("mixed order did not validate the task mapping: %s", body)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after mixed order: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("invalid task permutation partially changed config")
+	}
+	m.pendingMu.Lock()
+	queued := m.pendingOrder != nil
+	m.pendingMu.Unlock()
+	if queued {
+		t.Fatal("mixed order with an invalid mapping was queued")
+	}
+}
+
+func startControlTest(t *testing.T, contents string) (*model, *controlServer, string) {
+	t.Helper()
+	configPath := writeConfig(t, t.TempDir(), contents)
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	m := newModel(cfg)
+	cs, err := startControlServer(m, configPath)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(cs.Close)
+	return m, cs, configPath
+}
+
+func postControl(t *testing.T, cs *controlServer, path, body string) (*http.Response, []byte) {
+	t.Helper()
+	resp, err := http.Post("http://"+cs.listener.Addr().String()+path, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post %s: %v", path, err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read %s response: %v", path, err)
+	}
+	return resp, data
+}
+
+func assertControlOrder(t *testing.T, configPath string, wantProcesses, wantTasks []string) {
+	t.Helper()
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load ordered config: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.processOrder, wantProcesses) || !reflect.DeepEqual(cfg.taskOrder, wantTasks) {
+		t.Fatalf("config order processes=%v tasks=%v, want processes=%v tasks=%v", cfg.processOrder, cfg.taskOrder, wantProcesses, wantTasks)
+	}
 }

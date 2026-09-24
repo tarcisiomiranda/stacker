@@ -21,6 +21,7 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
 - **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`), in a session TUI or attached to a headless `serve`. The announced URL targets whoever holds the browser: the SSH address you connected through, or loopback on a local desktop. On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
 - **One-shot tasks** — named commands (migrations, seeds, deploys) that run once and exit, either scoped to a process or standalone.
+- **Process groups** — group services and standalone tasks into ordered, foldable sections with group actions in the TUI, web viewer, and CLI.
 - **Error highlighting** — opt-in orange badge when output looks like a traceback/panic/error, even while the service keeps running.
 - **Word wrap, per-process color dots, log marks, and a help overlay** — all toggleable at runtime; color and order changes are written back to the YAML.
 - **Clipboard-friendly** — drag to select, copy through native tools (`pbcopy`/`wl-copy`/`xclip`) with an OSC 52 fallback for SSH.
@@ -65,10 +66,12 @@ processes:
   backend:
     command: mise run back:dev
     port: 8000
+    group: application
     autostart: true
   frontend:
     command: mise run front:dev
     port: 3000
+    group: application
 ```
 
 Then run:
@@ -102,6 +105,7 @@ processes:
     graceful_timeout: 8s   # SIGTERM grace before SIGKILL
     port: 8000             # freed before every start/restart
     color: "#38bdf8"       # dot for visual grouping (quote hex — # starts a comment)
+    group: application
     tasks:                 # per-process one-shot commands (stream into this log)
       migrate: mise run migrate
       seed: python manage.py seed
@@ -112,6 +116,7 @@ tasks:
   deploy:
     command: ./deploy.sh
     cwd: ./infra
+    group: operations
   backup-db:
     command: pg_dump app > backup.sql
 ```
@@ -141,6 +146,7 @@ Each key under `processes:` is a service name (non-empty, unique). **Key order i
 | `graceful_timeout` | no | Go duration (`500ms`, `8s`, `1m30s`) to wait after SIGTERM before SIGKILL. Defaults to `8s`. |
 | `port` | no | TCP port (1–65535) freed before every start/restart. |
 | `color` | no | Hex (`"#0af"`, quoted) or CSS name; draws a colored dot. Editable at runtime. |
+| `group` | no | Trimmed label shared with services and standalone tasks. Missing or empty entries are grouped under `Other`. |
 | `tasks` | no | Map of `name: command` one-shot commands scoped to this process (see below). |
 
 ### Tasks
@@ -149,13 +155,25 @@ Two kinds of one-shot commands — for the "run once, process, exit" work you'd
 otherwise type in a second terminal:
 
 - **Per-process tasks** (`tasks:` nested under a process) run in that process's `cwd`, stream into its log prefixed `[task <name>]`, and **do not** change its status — the `--reload` server keeps serving. Trigger from the TUI (`t`), web (More ▾ → Tasks), or `stacker run <process> <task>`.
-- **Standalone tasks** (root-level `tasks:`) are their own list entry (marked `▶`) with their own log, tied to no process. Fields: `command` (required), optional `cwd` and `color`. Running one (TUI `Enter`, web `▶ Run`, or `stacker start <task>`) executes it and returns to `idle` — a clean exit is not a failure. Names must not clash with process names; they stay pinned after the processes and are excluded from reordering.
+- **Standalone tasks** (root-level `tasks:`) are their own list entry (marked `▶`) with their own log, tied to no process. Fields: `command` (required), optional `cwd`, `color`, and `group`. Running one (TUI `Enter`, web `▶ Run`, or `stacker start <task>`) executes it and returns to `idle` — a clean exit is not a failure. Names must not clash with process names. They appear after services within each section, and task-only sections follow sections containing services; task key order is preserved within each section.
+
+Standalone task fields:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `command` | yes | Shell command to run once. |
+| `cwd` | no | Working directory relative to the config file; missing on this machine disables only this task. |
+| `color` | no | Hex or CSS name for the sidebar dot; not editable at runtime. |
+| `group` | no | Trimmed label shared with service groups; missing or empty entries use `Other`. |
 
 ### Runtime behavior worth knowing
 
 - **Missing `cwd` disables one entry, not the file.** A `stacker.yml` shared across a team usually lists more repos than any single machine has cloned. Entries whose `cwd` is absent load with status `disabled` (dimmed, with the reason as the first log line) and are inert: no autostart, no free-port, and `start` fails with the reason instead of a bind error. Starting one re-checks the directory, so after `git clone` you just press start — no restart of Stacker, and a YAML edit re-evaluates it too. If the directory disappears while the service is up, the service keeps running and is only marked disabled once stopped.
 - **Free-port** targets the listener's whole process group, so supervisor trees (`npm → node`, `mise → uvicorn`) go down together instead of respawning the server; it retries a few rounds before reporting the port as still busy.
 - **Color** changes (TUI `c`, web selector) and **order** changes (TUI `Shift+↑/↓`, web drag) are written back to `stacker.yml`, preserving comments and formatting — so the file is not static while Stacker runs.
+- **Groups** use trimmed `group:` labels shared by services and standalone tasks. Sections retain first-appearance order among service-bearing groups, followed by task-only groups; `Other` is always last. Within a section, services precede standalone tasks and each YAML mapping's key order is preserved. Missing or empty groups share `Other`; its header is hidden only when every entry is ungrouped, while an explicit `group: Other` makes the shared section visible.
+- **Section folds and actions** are available in the session and attach TUIs (`←`/`h` folds, `→`/`l` unfolds, click a header to toggle). Fold state persists per config in Stacker's user cache; the web sidebar remembers folds in browser local storage per config. On a TUI header, `Enter` starts, `s` stops, `r` restarts, and `Space` marks the section. Start/stop/restart affect service members; marking affects active services and standalone tasks. The web sidebar provides group Start/Stop/Restart buttons.
+- **Group assignment and reordering** use session TUI `g` to assign or remove a configured member's group (the current group or `none` is highlighted; `↑/k` and `↓/j` navigate all picker choices, `enter` selects, digits `1`–`9` shortcut the first nine groups, and `0` removes the group), or web drag-and-drop to move entries between sections; both update `stacker.yml`. Session TUI `Shift+↑/↓` moves a header within its service-bearing or task-only tier, or a member within the same-kind entries in its section. `Other` stays last.
 - **Error highlighting** (`highlight_errors: true`) matches every captured line against built-in patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match the status turns orange with a `!` badge and the log title shows the count, even while running. Restart or a mark (`space`) clears it. It's one regex per line and only runs when enabled. The web `error badge` checkbox toggles it and persists the choice.
 
 ## TUI controls
@@ -164,13 +182,15 @@ The footer stays minimal (`? help • q quit`); press `?` for the full overlay.
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` or `k`/`j` | Select a process |
-| `Shift+↑`/`Shift+↓` | Move the selected process in the list (saved to YAML) |
-| `Enter` | Start the process (▶ standalone task: run once) |
+| `↑`/`↓` or `k`/`j` | Select a section header or member |
+| `←`/`h` / `→`/`l` | Fold / unfold the selected or enclosing section |
+| `Shift+↑`/`Shift+↓` | In the session TUI, move a section within its tier or a member within its same-kind section entries (saved to YAML) |
+| `g` | Open the session group picker (`↑/k` / `↓/j`, `enter`, `1`–`9`, `0`) for a configured member (saved to YAML) |
+| `Enter` | Start the selected process, or start service members when on a section header (▶ standalone task: run once) |
 | `s` | Stop |
 | `r` | Restart |
 | `f` | Free the configured `port` for the selected process |
-| `Space` | Insert a timestamped mark in the selected log |
+| `Space` | Insert a timestamped mark in the selected log, or mark active section members |
 | `m` | Mark every running process |
 | `t` | Open the one-shot task picker (`1`–`9` to run) |
 | `W` | Toggle word wrap |
@@ -200,7 +220,11 @@ Because a wildcard bind is not a destination, Stacker has to pick the host for t
 | Headless daemon, no SSH | The default-route address |
 | `ui.web_host` set explicitly | Exactly what you configured |
 
-The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶`), and per-process:
+The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶`). When any entry has an explicit `group`, the sidebar displays foldable sections in the same group order as the TUI; missing groups appear under `Other`, and the header is hidden only when every entry is ungrouped. Section headers offer Start, Stop, and Restart for their service members. Fold state is stored in browser local storage per config. Dragging an entry between sections changes its group; reordering and group changes are saved to `stacker.yml`.
+
+The group APIs are `POST /api/{name}/group` with `{"group":"name"}` (send an empty string to remove the assignment; the response returns the updated process in `process`) and `POST /api/groups/{start|stop|restart}` with `{"group":"name"}` (the response includes the group and action plus affected member names in `affected`, including on action errors).
+
+Per-process, the log page provides:
 
 - live, auto-refreshing logs with a **Copy all** button and **word-wrap** toggle;
 - **Start / Stop / Restart**, plus **Free port** when the process has one;
@@ -220,7 +244,10 @@ stacker serve -d                # same, daemonized in the background
 stacker attach                  # TUI against a running serve instance (q detaches)
 stacker down                    # stop all processes and shut down the supervisor
 stacker ping                    # exit 0 if an instance runs for this config
-stacker list --json             # process names, status, ports
+stacker list --json             # process names, status, ports, groups
+stacker start --group application
+stacker stop -g application
+stacker restart --group=application
 stacker status backend --json   # one process
 stacker logs backend            # last 200 lines of that process
 stacker logs backend -n 20 -f   # tail and follow (Ctrl+C to stop)
@@ -263,8 +290,11 @@ tools-worker -- stopped · :3060
 
 zsh and fish show the status next to each name; bash lists the names. It also
 completes commands, the flags of the command you are on, `--config` paths, and
-`stacker run <process> <TAB>` for that process's tasks. With no supervisor
-running it completes nothing and stays silent rather than erroring.
+`stacker run <process> <TAB>` for that process's tasks. `stacker start --group <TAB>`
+and `-g <TAB>` offer the live group names, including `Other` when ungrouped or
+explicit `Other` entries exist; `stacker __complete groups` prints the same
+candidates. With no supervisor running it completes nothing and stays silent
+rather than erroring.
 
 **Where the logs are.** Process output is kept in the supervisor's memory (bounded by `ui.max_log_lines` and `ui.max_log_bytes`), never written to disk. Three ways to read it: the TUI, the web viewer (`w`), and `stacker logs` — the only one that works over a pipe, in a script, or from an AI agent. Each `--json` reply carries a `next` index, so `--since <next>` returns only what was added since the last read; that is the incremental pattern to prefer over `-f`, which never returns. `stacker logs --supervisor` is different: it reads the daemon's own log **file**, so it answers even when the supervisor failed to start, and holds supervisor notices rather than process output. A bare `stacker` with no TTY prints the running instances plus the exact log command for each.
 

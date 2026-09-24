@@ -12,15 +12,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// configWriteMu serializes config rewrites; the TUI (`c`) and the web color
-// selector can both write, potentially at the same time.
 var configWriteMu sync.Mutex
 
-// updateConfigColor rewrites the `color` field of one process in the YAML
-// config. It edits the raw text at the line located through the yaml.Node
-// tree, so comments, blank lines, key order, and formatting all survive.
-// An empty color removes the field.
 func updateConfigColor(path, name, color string) error {
+	return updateConfigField(path, "processes", name, "color", color)
+}
+
+func updateConfigField(path, mapping, name, key, value string) error {
 	configWriteMu.Lock()
 	defer configWriteMu.Unlock()
 
@@ -36,139 +34,126 @@ func updateConfigColor(path, name, color string) error {
 		return errors.New("config is not a YAML mapping")
 	}
 	root := doc.Content[0]
-	processes := mappingValue(root, "processes")
-	if processes == nil || processes.Kind != yaml.MappingNode {
-		return errors.New("config has no processes mapping")
+	entries := mappingValue(root, mapping)
+	if entries == nil || entries.Kind != yaml.MappingNode {
+		return fmt.Errorf("config has no %s mapping", mapping)
 	}
-	var procKey, procVal *yaml.Node
-	for i := 0; i+1 < len(processes.Content); i += 2 {
-		if processes.Content[i].Value == name {
-			procKey, procVal = processes.Content[i], processes.Content[i+1]
+	var entryKey, entryValue *yaml.Node
+	for i := 0; i+1 < len(entries.Content); i += 2 {
+		if entries.Content[i].Value == name {
+			entryKey, entryValue = entries.Content[i], entries.Content[i+1]
 			break
 		}
 	}
-	if procKey == nil {
-		return fmt.Errorf("process %q not found in %s", name, path)
+	if entryKey == nil {
+		return fmt.Errorf("%s entry %q not found in %s", mapping, name, path)
 	}
-	if procVal.Kind != yaml.MappingNode {
-		return fmt.Errorf("process %q is not a mapping", name)
+	if entryValue.Kind != yaml.MappingNode {
+		return fmt.Errorf("%s entry %q is not a mapping", mapping, name)
 	}
 
-	out, err := spliceColorLine(string(data), &doc, procKey, procVal, color)
+	out, err := spliceConfigField(string(data), &doc, mapping, entryKey, entryValue, key, value)
 	if err == nil {
-		// Guard against a bad splice before touching the file.
-		var check map[string]any
-		if yaml.Unmarshal([]byte(out), &check) != nil {
-			err = errors.New("spliced config does not parse")
-		}
+		err = verifyConfigField(out, mapping, name, key, value)
 	}
 	if err != nil {
-		// Fallback: re-encode the whole tree. Keeps comments but may drop
-		// blank lines; only used for layouts the splicer does not handle.
-		out, err = encodeConfigColor(root, procVal, color)
+		out, err = encodeConfigField(root, entryValue, key, value)
 		if err != nil {
 			return err
 		}
-	}
-
-	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	return os.WriteFile(path, []byte(out), mode)
-}
-
-// updateConfigOrder rewrites the YAML so the processes mapping follows the
-// given name order. It moves whole text blocks (including each process's
-// preceding comment lines), so formatting survives; falls back to a tree
-// re-encode for layouts the splicer cannot handle.
-func updateConfigOrder(path string, names []string) error {
-	configWriteMu.Lock()
-	defer configWriteMu.Unlock()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return err
-	}
-	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return errors.New("config is not a YAML mapping")
-	}
-	root := doc.Content[0]
-	processes := mappingValue(root, "processes")
-	if processes == nil || processes.Kind != yaml.MappingNode {
-		return errors.New("config has no processes mapping")
-	}
-	current := make([]string, 0, len(processes.Content)/2)
-	for i := 0; i+1 < len(processes.Content); i += 2 {
-		current = append(current, processes.Content[i].Value)
-	}
-	if !samePermutation(current, names) {
-		return fmt.Errorf("order %v is not a permutation of processes %v", names, current)
-	}
-
-	out, err := spliceProcessOrder(string(data), &doc, root, processes, names)
-	if err == nil {
-		if verr := verifyOrder(out, names); verr != nil {
-			err = verr
-		}
-	}
-	if err != nil {
-		out, err = encodeProcessOrder(root, processes, names)
-		if err != nil {
+		if err := verifyConfigField(out, mapping, name, key, value); err != nil {
 			return err
 		}
 	}
 	return writeConfigFile(path, out)
 }
 
-// spliceProcessOrder moves the text block of each process (its key line, the
-// nested lines under it, and comment lines directly above it) into the
-// requested order.
-func spliceProcessOrder(text string, doc, root, processes *yaml.Node, names []string) (string, error) {
-	if processes.Style&yaml.FlowStyle != 0 {
-		return "", errors.New("flow-style processes mapping")
+func updateConfigOrder(path, mapping string, names []string) error {
+	configWriteMu.Lock()
+	defer configWriteMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return errors.New("config is not a YAML mapping")
+	}
+	root := doc.Content[0]
+	entries := mappingValue(root, mapping)
+	if entries == nil || entries.Kind != yaml.MappingNode {
+		return fmt.Errorf("config has no %s mapping", mapping)
+	}
+	current := make([]string, 0, len(entries.Content)/2)
+	for i := 0; i+1 < len(entries.Content); i += 2 {
+		current = append(current, entries.Content[i].Value)
+	}
+	if !samePermutation(current, names) {
+		return fmt.Errorf("order %v is not a permutation of %s %v", names, mapping, current)
+	}
+
+	out, err := spliceConfigOrder(string(data), &doc, root, mapping, entries, names)
+	if err == nil {
+		err = verifyOrder(out, mapping, names)
+	}
+	if err != nil {
+		out, err = encodeConfigOrder(root, entries, names)
+		if err != nil {
+			return err
+		}
+		if err := verifyOrder(out, mapping, names); err != nil {
+			return err
+		}
+	}
+	return writeConfigFile(path, out)
+}
+
+func spliceConfigOrder(text string, doc, root *yaml.Node, mapping string, entries *yaml.Node, names []string) (string, error) {
+	if entries.Style&yaml.FlowStyle != 0 {
+		return "", fmt.Errorf("flow-style %s mapping", mapping)
 	}
 	lines := strings.Split(text, "\n")
 
-	procKey := findKeyNode(root, "processes")
-	if procKey == nil {
-		return "", errors.New("processes key not found")
+	mappingKey := findKeyNode(root, mapping)
+	if mappingKey == nil {
+		return "", fmt.Errorf("%s key not found", mapping)
+	}
+	if len(entries.Content) == 0 {
+		return text, nil
 	}
 
 	type block struct {
 		name       string
-		start, end int // 0-based, end exclusive
+		start, end int
 	}
 	blocks := make([]block, 0, len(names))
-	for i := 0; i+1 < len(processes.Content); i += 2 {
-		key, val := processes.Content[i], processes.Content[i+1]
+	for i := 0; i+1 < len(entries.Content); i += 2 {
+		key, val := entries.Content[i], entries.Content[i+1]
 		if val.Style&yaml.FlowStyle != 0 || val.Line == key.Line {
-			return "", errors.New("inline process mapping")
+			return "", fmt.Errorf("inline %s entry", mapping)
 		}
 		blocks = append(blocks, block{name: key.Value, start: key.Line - 1})
 	}
 	for i := 1; i < len(blocks); i++ {
 		if blocks[i].start <= blocks[i-1].start {
-			return "", errors.New("unexpected process line layout")
+			return "", fmt.Errorf("unexpected %s line layout", mapping)
 		}
 	}
 
-	// Section end: the next key at the processes indent or shallower.
 	sectionEnd := len(lines)
 	last := blocks[len(blocks)-1].start
 	walkKeys(doc, func(k *yaml.Node) {
-		if k.Line-1 > last && k.Column <= procKey.Column && k.Line-1 < sectionEnd {
+		if k.Line-1 > last && k.Column <= mappingKey.Column && k.Line-1 < sectionEnd {
 			sectionEnd = k.Line - 1
 		}
 	})
 
-	// Pull comment lines directly above each key into its block.
 	for i := range blocks {
-		floor := procKey.Line // first line after the processes: key itself
+		floor := mappingKey.Line
 		if i > 0 {
 			floor = blocks[i-1].start
 		}
@@ -184,8 +169,6 @@ func spliceProcessOrder(text string, doc, root, processes *yaml.Node, names []st
 		}
 	}
 
-	// Normalize: strip trailing blank lines per block, remember whether the
-	// original used blank separators between blocks.
 	blankSep := false
 	contents := make(map[string][]string, len(blocks))
 	for _, b := range blocks {
@@ -216,8 +199,7 @@ func spliceProcessOrder(text string, doc, root, processes *yaml.Node, names []st
 	return strings.Join(rebuilt, "\n"), nil
 }
 
-// verifyOrder checks the spliced YAML parses and lists processes as expected.
-func verifyOrder(text string, names []string) error {
+func verifyOrder(text, mapping string, names []string) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
 		return err
@@ -225,36 +207,36 @@ func verifyOrder(text string, names []string) error {
 	if len(doc.Content) == 0 {
 		return errors.New("spliced config is empty")
 	}
-	processes := mappingValue(doc.Content[0], "processes")
-	if processes == nil {
-		return errors.New("spliced config lost the processes mapping")
+	entries := mappingValue(doc.Content[0], mapping)
+	if entries == nil || entries.Kind != yaml.MappingNode {
+		return fmt.Errorf("spliced config lost the %s mapping", mapping)
 	}
-	got := make([]string, 0, len(processes.Content)/2)
-	for i := 0; i+1 < len(processes.Content); i += 2 {
-		got = append(got, processes.Content[i].Value)
+	got := make([]string, 0, len(entries.Content)/2)
+	for i := 0; i+1 < len(entries.Content); i += 2 {
+		got = append(got, entries.Content[i].Value)
 	}
 	if len(got) != len(names) {
-		return errors.New("spliced config changed the process count")
+		return fmt.Errorf("spliced config changed the %s count", mapping)
 	}
 	for i := range got {
 		if got[i] != names[i] {
-			return errors.New("spliced config does not match the requested order")
+			return fmt.Errorf("spliced config does not match the requested %s order", mapping)
 		}
 	}
 	return nil
 }
 
-func encodeProcessOrder(root, processes *yaml.Node, names []string) (string, error) {
+func encodeConfigOrder(root, entries *yaml.Node, names []string) (string, error) {
 	pairs := make(map[string][2]*yaml.Node, len(names))
-	for i := 0; i+1 < len(processes.Content); i += 2 {
-		pairs[processes.Content[i].Value] = [2]*yaml.Node{processes.Content[i], processes.Content[i+1]}
+	for i := 0; i+1 < len(entries.Content); i += 2 {
+		pairs[entries.Content[i].Value] = [2]*yaml.Node{entries.Content[i], entries.Content[i+1]}
 	}
-	reordered := make([]*yaml.Node, 0, len(processes.Content))
+	reordered := make([]*yaml.Node, 0, len(entries.Content))
 	for _, name := range names {
 		pair := pairs[name]
 		reordered = append(reordered, pair[0], pair[1])
 	}
-	processes.Content = reordered
+	entries.Content = reordered
 	return encodeRoot(root)
 }
 
@@ -440,55 +422,55 @@ func samePermutation(a, b []string) bool {
 	return true
 }
 
-// spliceColorLine performs the line-level edit: replace or delete the existing
-// `color:` line, or insert one at the end of the process block.
-func spliceColorLine(text string, doc, procKey, procVal *yaml.Node, color string) (string, error) {
-	if procVal.Style&yaml.FlowStyle != 0 {
-		return "", errors.New("flow-style process mapping")
+func spliceConfigField(text string, doc *yaml.Node, mapping string, entryKey, entryValue *yaml.Node, key, value string) (string, error) {
+	if entryValue.Style&yaml.FlowStyle != 0 {
+		return "", fmt.Errorf("flow-style %s entry", mapping)
 	}
 	lines := strings.Split(text, "\n")
 
-	var colorKey, colorVal *yaml.Node
-	for i := 0; i+1 < len(procVal.Content); i += 2 {
-		if procVal.Content[i].Value == "color" {
-			colorKey, colorVal = procVal.Content[i], procVal.Content[i+1]
+	var fieldKey, fieldValue *yaml.Node
+	for i := 0; i+1 < len(entryValue.Content); i += 2 {
+		if entryValue.Content[i].Value == key {
+			fieldKey, fieldValue = entryValue.Content[i], entryValue.Content[i+1]
 			break
 		}
 	}
 
-	if colorKey != nil {
-		idx := colorKey.Line - 1
-		if idx < 0 || idx >= len(lines) || colorVal.Line != colorKey.Line {
-			return "", errors.New("unexpected color line layout")
+	if fieldKey != nil {
+		idx := fieldKey.Line - 1
+		if idx < 0 || idx >= len(lines) || fieldValue.Line != fieldKey.Line {
+			return "", fmt.Errorf("unexpected %s field line layout", key)
 		}
-		if color == "" {
+		if value == "" {
 			lines = append(lines[:idx], lines[idx+1:]...)
 		} else {
+			scalar, err := encodeStringScalar(value)
+			if err != nil {
+				return "", err
+			}
 			old := lines[idx]
 			indent := old[:len(old)-len(strings.TrimLeft(old, " \t"))]
-			replaced := indent + `color: "` + color + `"`
-			if colorVal.LineComment != "" {
-				replaced += " " + colorVal.LineComment
+			replaced := indent + key + ": " + scalar
+			if fieldValue.LineComment != "" {
+				replaced += "  " + fieldValue.LineComment
 			}
 			lines[idx] = replaced
 		}
 		return strings.Join(lines, "\n"), nil
 	}
 
-	if color == "" {
+	if value == "" {
 		return strings.Join(lines, "\n"), nil
 	}
 
-	// Insert before the next key at the same or shallower indent (end of this
-	// process block), backing up over blank and comment lines.
 	boundary := len(lines)
 	walkKeys(doc, func(k *yaml.Node) {
-		if k.Line > procKey.Line && k.Column <= procKey.Column && k.Line-1 < boundary {
+		if k.Line > entryKey.Line && k.Column <= entryKey.Column && k.Line-1 < boundary {
 			boundary = k.Line - 1
 		}
 	})
 	insert := boundary
-	for insert > procKey.Line {
+	for insert > entryKey.Line {
 		prev := strings.TrimSpace(lines[insert-1])
 		if prev == "" || strings.HasPrefix(prev, "#") {
 			insert--
@@ -496,13 +478,86 @@ func spliceColorLine(text string, doc, procKey, procVal *yaml.Node, color string
 			break
 		}
 	}
-	if len(procVal.Content) == 0 || procVal.Content[0].Column < 1 {
+	if len(entryValue.Content) == 0 || entryValue.Content[0].Column < 1 {
 		return "", errors.New("cannot determine field indent")
 	}
-	indent := strings.Repeat(" ", procVal.Content[0].Column-1)
-	newLine := indent + `color: "` + color + `"`
+	scalar, err := encodeStringScalar(value)
+	if err != nil {
+		return "", err
+	}
+	indent := strings.Repeat(" ", entryValue.Content[0].Column-1)
+	newLine := indent + key + ": " + scalar
 	lines = append(lines[:insert], append([]string{newLine}, lines[insert:]...)...)
 	return strings.Join(lines, "\n"), nil
+}
+
+func verifyConfigField(text, mapping, name, key, value string) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return errors.New("spliced config is not a YAML mapping")
+	}
+	entries := mappingValue(doc.Content[0], mapping)
+	if entries == nil || entries.Kind != yaml.MappingNode {
+		return fmt.Errorf("spliced config lost the %s mapping", mapping)
+	}
+	entry := mappingValue(entries, name)
+	if entry == nil || entry.Kind != yaml.MappingNode {
+		return fmt.Errorf("spliced config lost the %s entry %q", mapping, name)
+	}
+	field := mappingValue(entry, key)
+	if value == "" {
+		if field != nil {
+			return fmt.Errorf("spliced config retained the %s field", key)
+		}
+		return nil
+	}
+	if field == nil || field.Kind != yaml.ScalarNode || field.Tag != "!!str" || field.Value != value {
+		return fmt.Errorf("spliced config does not match the requested %s value", key)
+	}
+	return nil
+}
+
+func encodeConfigField(root, entry *yaml.Node, key, value string) (string, error) {
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		if entry.Content[i].Value != key {
+			continue
+		}
+		if value == "" {
+			entry.Content = append(entry.Content[:i], entry.Content[i+2:]...)
+		} else {
+			previous := entry.Content[i+1]
+			entry.Content[i+1] = stringValueNode(value, previous)
+		}
+		return encodeRoot(root)
+	}
+	if value != "" {
+		entry.Content = append(entry.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			stringValueNode(value, nil),
+		)
+	}
+	return encodeRoot(root)
+}
+
+func stringValueNode(value string, previous *yaml.Node) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: yaml.DoubleQuotedStyle}
+	if previous != nil {
+		node.HeadComment = previous.HeadComment
+		node.LineComment = previous.LineComment
+		node.FootComment = previous.FootComment
+	}
+	return node
+}
+
+func encodeStringScalar(value string) (string, error) {
+	data, err := yaml.Marshal(stringValueNode(value, nil))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(string(data), "\n"), nil
 }
 
 // walkKeys visits every mapping key node in the document.
@@ -520,20 +575,6 @@ func walkKeys(n *yaml.Node, fn func(k *yaml.Node)) {
 	}
 }
 
-func encodeConfigColor(root, proc *yaml.Node, color string) (string, error) {
-	setOrRemoveColor(proc, color)
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(root); err != nil {
-		return "", err
-	}
-	if err := enc.Close(); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
-
 func mappingValue(node *yaml.Node, key string) *yaml.Node {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
@@ -544,28 +585,4 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 		}
 	}
 	return nil
-}
-
-func setOrRemoveColor(proc *yaml.Node, color string) {
-	for i := 0; i+1 < len(proc.Content); i += 2 {
-		if proc.Content[i].Value != "color" {
-			continue
-		}
-		if color == "" {
-			proc.Content = append(proc.Content[:i], proc.Content[i+2:]...)
-		} else {
-			v := proc.Content[i+1]
-			v.SetString(color)
-			// Hex colors start with `#`, which would read as a comment when
-			// unquoted; force quoting.
-			v.Style = yaml.DoubleQuotedStyle
-		}
-		return
-	}
-	if color == "" {
-		return
-	}
-	key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "color"}
-	val := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: color, Style: yaml.DoubleQuotedStyle}
-	proc.Content = append(proc.Content, key, val)
 }

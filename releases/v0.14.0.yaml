@@ -1,0 +1,19 @@
+# Hand-written release notes for v0.14.0.
+# Used by .github/scripts/release.py for the GitHub Release body.
+
+tag: v0.14.0
+
+highlights: |
+  Services and standalone tasks can be organized into named sections across
+  the TUI, attach view, web sidebar, and CLI. Sections can be folded, reordered,
+  and controlled together, with unassigned entries collected under `Other`.
+
+features:
+  - "**`group:` in process and standalone-task entries** — assign a shared label; missing or empty labels use `Other`"
+  - "**Grouped sections** — preserve first appearance within service-bearing and task-only tiers, put services before standalone tasks, and keep `Other` last"
+  - "**Horizontal section headers** — divider lines frame group names; `−/+` show expanded and collapsed states"
+  - "**Foldable sections** — TUI fold state persists per config; the web sidebar remembers folds in browser local storage"
+  - "**Group actions** — TUI headers start, stop, or restart service members; marking applies to active services and standalone tasks; web headers offer Start, Stop, and Restart"
+  - "**Group assignment and ordering** — TUI `g` changes a member's group; TUI reordering and web drag-and-drop persist group and order edits to YAML"
+  - "**Group-aware CLI** — `start`, `stop`, and `restart` accept `--group`, `-g`, or `--group=`, and `list` includes group values"
+  - "**Shell completion** — `--group` and `-g` complete live group names; `stacker __complete groups` prints them"

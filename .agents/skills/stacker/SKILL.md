@@ -55,7 +55,7 @@ stacker restart backend
 - Prefer **`stop`** when switching projects or releasing a port.
 - Prefer **`--json`** so you can parse status reliably.
 
-Process names come from keys under `processes:` in `stacker.yml` — never guess.
+Process names come from keys under `processes:` in `stacker.yml`; group names come from the configured `group:` labels — never guess either.
 
 ## 3. Reading logs (do this instead of opening the TUI)
 
@@ -136,6 +136,7 @@ processes:
     autostart: false   # registered, but user/CLI starts it
     graceful_timeout: 8s
     port: 8000         # optional; freed before every start/restart
+    group: application
 ```
 
 - `autostart: false` (default) → listed, not auto-started when Stacker opens.
@@ -143,6 +144,8 @@ processes:
   `512kb`, or a plain byte count. Whichever cap hits first (lines or bytes)
   drops the oldest lines. Raise it before raising `max_log_lines` a lot.
 - `port` → free listeners before start (fixes stray AI-started servers).
+- `group` → optional trimmed label shared by services and root-level standalone tasks. Missing or empty values use the implicit `Other` group. Standalone task entries accept only `command`, `cwd`, `color`, and `group`.
+- Group sections keep first-appearance order among service-bearing groups, followed by task-only groups; `Other` is last. Services precede standalone tasks within each section. TUI section folds persist per config in Stacker's user cache; web sidebar folds persist in browser local storage per config.
 - Unknown YAML fields are rejected by Stacker.
 - A `cwd` that does not exist on this machine (repo not cloned) does **not**
   break the config: that entry alone shows status `disabled` and never starts
@@ -194,8 +197,12 @@ stacker ping --json
 stacker list --json
 stacker status <name> --json
 stacker start <name>
+stacker start --group <group>
+stacker start -g <group>
 stacker stop <name>
+stacker stop --group=<group>
 stacker restart <name>
+stacker restart --group <group>
 stacker logs <name> -n 100      # tail of one process (default 200 lines)
 stacker logs <name> --json      # lines + "next" to resume from
 stacker logs <name> --since N   # only what came after index N
@@ -204,7 +211,14 @@ stacker free-port <port>        # no instance required
 stacker instances --json        # every supervisor on this machine
 stacker completion zsh          # completion script (bash | zsh | fish)
 stacker __complete processes    # names + status, no jq needed
+stacker __complete groups       # live group names for --group / -g
 ```
+
+`start`, `stop`, and `restart` accept `--group <name>`, `-g <name>`, or
+`--group=<name>` instead of a process name. Group mode does not accept a process
+name. `stacker list` includes a `GROUP` column (`-` when unassigned), and
+`list --json` includes `group` for configured group assignments. Shell completion offers live
+group names after either group flag.
 
 Never `stacker logs <name> -f` in an agent: it never returns.
 
