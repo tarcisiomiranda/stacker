@@ -35,6 +35,47 @@ func TestCollapsedStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSidebarWidthRoundTripPreservesCollapsedSections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ui", "state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{\"collapsed\":[\"hub\"],\"sidebar_width\":31}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveSidebarWidth(path, 27); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCollapsed(path, map[string]bool{"hub": true}, []section{{Name: "hub"}}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadUIState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SidebarWidth != 27 || !reflect.DeepEqual(state.Collapsed, []string{"hub"}) {
+		t.Fatalf("state = %+v, want width 27 and hub collapsed", state)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("cache permissions = %v, want 0600", info.Mode())
+	}
+}
+
+func TestSidebarWidthLoadsLegacyCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{\"collapsed\":[]}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadUIState(path)
+	if err != nil || state.SidebarWidth != 0 || state.Collapsed == nil {
+		t.Fatalf("legacy state = %+v, err = %v", state, err)
+	}
+}
+
 func TestCollapsedStateMissingFileReturnsEmptyMap(t *testing.T) {
 	got, err := loadCollapsed(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil {

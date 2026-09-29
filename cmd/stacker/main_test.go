@@ -545,7 +545,7 @@ func TestLogViewWordWrapShowsFullLines(t *testing.T) {
 	}})
 	m.width = 100
 	m.height = 30
-	m.wrap = true
+	m.primaryPane.Wrap = true
 	long := strings.Repeat("abc ", 60)
 	m.current().appendLog(long)
 	m.scrollToBottom()
@@ -570,7 +570,7 @@ func TestVisualLinesShareLogicalIndexWhenWrapped(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{
 		"demo": {Command: "true"},
 	}})
-	m.wrap = true
+	m.primaryPane.Wrap = true
 	vis := m.visualLines([]string{"short", strings.Repeat("x", 25)}, 10)
 	if len(vis) != 4 {
 		t.Fatalf("expected 4 visual lines, got %d: %#v", len(vis), vis)
@@ -820,7 +820,7 @@ processes:
 	if !cfg.UI.WordWrap {
 		t.Fatal("expected word_wrap to be true")
 	}
-	if m := newModel(cfg); !m.wrap {
+	if m := newModel(cfg); !m.primaryPane.Wrap {
 		t.Fatal("expected model wrap to start enabled")
 	}
 }

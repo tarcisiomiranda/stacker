@@ -125,6 +125,46 @@ processes:
 	}
 }
 
+func TestWebLogSidebarResizeMarkupAndDarkScrollbars(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), "version: 1\nprocesses:\n  backend:\n    command: true\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := startWebServer(newModel(cfg), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	response, err := http.Get("http://" + ws.Addr() + "/logs/backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(body)
+	for _, fragment := range []string{`id="sidebar"`, `id="sidebar-resize"`, `role="separator"`, `tabindex="0"`, `aria-orientation="vertical"`, `--sidebar-width: 224px`, `#plist::-webkit-scrollbar`, `#log::-webkit-scrollbar`, `scrollbar-color:`, `display: flex; height: 100vh;`, `#plist { flex: 1; min-height: 0; overflow-y: auto; }`} {
+		if !strings.Contains(page, fragment) {
+			t.Fatalf("logs page lacks %q", fragment)
+		}
+	}
+	response, err = http.Get("http://" + ws.Addr() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `id="sidebar-resize"`) {
+		t.Fatal("index page gained a log sidebar resizer")
+	}
+}
+
 func TestListenWebDefaultPort(t *testing.T) {
 	ln, err := listenWeb(UIConfig{})
 	if err != nil {

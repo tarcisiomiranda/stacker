@@ -1,0 +1,17 @@
+tag: v0.15.0
+previous: v0.14.0
+
+highlights: |
+  Compare two service or standalone-task logs in the session TUI. Resize the
+  process sidebar in the terminal and web viewer, and scroll long service
+  lists without shrinking the terminal font.
+
+features:
+  - "**Two log panes in the session TUI** — `v` chooses another service or standalone task, `V` switches between stacked and side-by-side views, and `Tab` changes the focused pane"
+  - "**Independent log controls** — mouse-wheel focus, scrolling, wrap, selection, copying, and `p` auto-scroll pause work per pane; `G` resumes following from the bottom while log capture continues"
+  - "**Resizable terminal sidebar** — drag the divider or use `[` and `]` in session or attach; the width persists per config alongside section folds"
+  - "**Scrollable process lists** — long session and attach sidebars stay within the terminal height; the wheel scrolls the sidebar and keyboard navigation keeps the selected entry visible"
+  - "**Resizable web sidebar** — drag the divider or use Left/Right/Home on the log page; width is stored per config in the browser"
+
+fixes:
+  - "**Web viewer scrollbars** — thin dark scrollbars for the process list and logs, including when the Tailwind CDN is unavailable"

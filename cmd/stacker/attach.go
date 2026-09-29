@@ -68,6 +68,7 @@ type attachModel struct {
 
 	procs               []ProcessInfo
 	selected            int
+	listOffset          int
 	hasSnapshot         bool
 	snapshotSeq         uint64
 	selectionGeneration uint64
@@ -78,11 +79,13 @@ type attachModel struct {
 	logNext             int
 	logName             string
 
-	width, height int
-	logOffset     int
-	follow        bool
-	wrap          bool
-	showHelp      bool
+	width, height         int
+	preferredSidebarWidth int
+	resizingSidebar       bool
+	logOffset             int
+	follow                bool
+	wrap                  bool
+	showHelp              bool
 
 	statusText string
 	pollErr    string
@@ -100,6 +103,9 @@ func newAttachModel(client *controlClient, configPath string) *attachModel {
 	if statePath, err := uiStatePath(configPath); err == nil {
 		m.collapsedPath = statePath
 		m.collapsed = loadCollapsedOrEmpty(statePath)
+		if state, err := loadUIState(statePath); err == nil {
+			m.preferredSidebarWidth = state.SidebarWidth
+		}
 	} else {
 		m.collapsedPathErr = err
 	}
@@ -560,6 +566,10 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.foldSelectedSection(true)
 		case "right", "l":
 			m.foldSelectedSection(false)
+		case "[":
+			m.resizeSidebar(-2)
+		case "]":
+			m.resizeSidebar(2)
 		case "s":
 			if current := m.selectedSection(); current != nil {
 				return m, m.groupActionCmd(current.Name, "stop")
@@ -613,6 +623,38 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 		}
 	case tea.MouseMsg:
+		if m.resizingSidebar {
+			switch msg.Action {
+			case tea.MouseActionMotion:
+				m.preferredSidebarWidth = clampSidebarWidth(m.width, msg.X+1, m.leftWidth())
+			case tea.MouseActionRelease:
+				m.preferredSidebarWidth = clampSidebarWidth(m.width, msg.X+1, m.leftWidth())
+				m.resizingSidebar = false
+				m.saveSidebarWidth()
+			}
+			return m, nil
+		}
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y < m.height-2 && msg.X >= m.leftWidth()-1 && msg.X <= m.leftWidth() {
+			m.resizingSidebar = true
+			return m, nil
+		}
+		visibleRows := sidebarVisibleRows(m.height, len(m.rows()))
+		if msg.Action == tea.MouseActionPress && msg.X < m.leftWidth() && msg.Y >= 2 && msg.Y < 2+visibleRows && len(m.rows()) > 0 {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+				delta := 3
+				if msg.Button == tea.MouseButtonWheelUp {
+					delta = -delta
+				}
+				m.listOffset = sidebarScrollOffset(m.listOffset, len(m.rows()), visibleRows, delta)
+				selected := clamp(m.selected, m.listOffset, min(len(m.rows())-1, m.listOffset+visibleRows-1))
+				if selected != m.selected {
+					m.selected = selected
+					m.resetLogs()
+				}
+				return m, nil
+			}
+		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.follow = false
@@ -623,10 +665,10 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.follow = true
 			}
 		case tea.MouseButtonLeft:
-			if msg.Action == tea.MouseActionPress && msg.X < m.leftWidth() && msg.Y >= 2 {
+			if msg.Action == tea.MouseActionPress && msg.X < m.leftWidth() && (m.height <= 0 || msg.Y >= 2 && msg.Y < 2+visibleRows) {
 				rows := m.rows()
-				index := msg.Y - 2
-				if index < len(rows) {
+				index := clamp(m.listOffset+msg.Y-2, 0, max(0, len(rows)-1))
+				if len(rows) > 0 {
 					m.selected = index
 					if rows[index].Header != nil {
 						m.toggleSection(rows[index].Header)
@@ -661,7 +703,25 @@ func (m *attachModel) leftWidth() int {
 	if w > 36 {
 		w = 36
 	}
-	return min(w, max(18, m.width/4))
+	return clampSidebarWidth(m.width, m.preferredSidebarWidth, min(w, max(18, m.width/4)))
+}
+
+func (m *attachModel) resizeSidebar(delta int) {
+	m.preferredSidebarWidth = clampSidebarWidth(m.width, m.leftWidth()+delta, m.leftWidth())
+	m.saveSidebarWidth()
+}
+
+func (m *attachModel) saveSidebarWidth() {
+	if m.collapsedPathErr != nil {
+		m.statusText = "Sidebar width save failed: " + m.collapsedPathErr.Error()
+		return
+	}
+	if m.collapsedPath == "" {
+		return
+	}
+	if err := saveSidebarWidth(m.collapsedPath, m.preferredSidebarWidth); err != nil {
+		m.statusText = "Sidebar width save failed: " + err.Error()
+	}
 }
 
 func (m *attachModel) View() string {
@@ -705,6 +765,8 @@ func (m *attachModel) footerView() string {
 func (m *attachModel) helpView() string {
 	rows := [][2]string{
 		{"↑/k ↓/j", "select process"},
+		{"wheel", "scroll process list under mouse"},
+		{"[/]", "resize process sidebar (or drag divider)"},
 		{"←/h →/l", "fold section"},
 		{"enter", "start"},
 		{"s", "stop"},
@@ -739,11 +801,14 @@ func (m *attachModel) processList() string {
 	b.WriteString(mutedStyle.Render(" · attached"))
 	b.WriteString("\n")
 	rows := m.rows()
+	visibleRows := sidebarVisibleRows(m.height, len(rows))
+	m.listOffset = sidebarSelectionOffset(m.listOffset, m.selected, len(rows), visibleRows)
 	if len(rows) == 0 {
 		b.WriteString(mutedStyle.Render("(none)"))
 		return b.String()
 	}
-	for i, row := range rows {
+	for i := m.listOffset; i < len(rows) && i < m.listOffset+visibleRows; i++ {
+		row := rows[i]
 		if row.Header != nil {
 			b.WriteString(formatSectionHeader(
 				row.Header.Name,
@@ -752,7 +817,7 @@ func (m *attachModel) processList() string {
 				i == m.selected,
 				max(1, m.leftWidth()-5),
 			))
-			if i+1 < len(rows) {
+			if i+1 < len(rows) && i+1 < m.listOffset+visibleRows {
 				b.WriteByte('\n')
 			}
 			continue
@@ -788,7 +853,7 @@ func (m *attachModel) processList() string {
 			contentWidth: max(1, m.leftWidth()-5),
 		})
 		b.WriteString(line)
-		if i+1 < len(rows) {
+		if i+1 < len(rows) && i+1 < m.listOffset+visibleRows {
 			b.WriteByte('\n')
 		}
 	}

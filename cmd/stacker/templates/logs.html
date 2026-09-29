@@ -7,13 +7,25 @@
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <style>
 /* Minimal fallback so the page stays usable if the Tailwind CDN is offline. */
-body { background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
+body { display: flex; height: 100vh; overflow: hidden; margin: 0; background: #0a0a0a; color: #e5e5e5; font-family: monospace; }
 pre { overflow: auto; }
+:root { --sidebar-width: 224px; }
+#sidebar { display: flex; flex-direction: column; min-height: 0; width: var(--sidebar-width); flex: 0 0 auto; background: #171717; }
+#plist { flex: 1; min-height: 0; overflow-y: auto; }
+#log { flex: 1; min-height: 0; background: #0a0a0a; color: #e5e5e5; }
+main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+#sidebar-resize { width: 6px; flex: 0 0 6px; background: #262626; cursor: col-resize; touch-action: none; }
+#sidebar-resize:hover, #sidebar-resize:focus-visible { background: #737373; outline: none; }
+#plist, #log { scrollbar-width: thin; scrollbar-color: #525252 #171717; }
+#plist::-webkit-scrollbar, #log::-webkit-scrollbar { width: 6px; height: 6px; }
+#plist::-webkit-scrollbar-track, #log::-webkit-scrollbar-track { background: #171717; }
+#plist::-webkit-scrollbar-thumb, #log::-webkit-scrollbar-thumb { background: #525252; border-radius: 6px; }
+#plist::-webkit-scrollbar-thumb:hover, #log::-webkit-scrollbar-thumb:hover { background: #737373; }
 </style>
 </head>
 <body class="bg-neutral-950 text-neutral-200 font-mono h-screen flex overflow-hidden text-sm">
 
-<aside class="w-56 shrink-0 flex flex-col border-r border-neutral-800 bg-neutral-900">
+<aside id="sidebar" class="flex flex-col bg-neutral-900">
   <a href="/" class="px-4 py-2 border-b border-neutral-800 hover:text-white block" title="{{.Config}}">
     <span class="font-bold block">Stacker</span>
     <span class="text-neutral-400 text-xs block truncate">{{.ConfigLabel}}</span>
@@ -94,6 +106,8 @@ pre { overflow: auto; }
     {{end}}
   </nav>
 </aside>
+
+<div id="sidebar-resize" role="separator" tabindex="0" aria-label="Resize process sidebar" aria-orientation="vertical" aria-valuemin="160" aria-valuemax="560" aria-valuenow="224"></div>
 
 <main class="flex-1 flex flex-col min-w-0">
   <header id="topbar" class="flex items-center gap-4 flex-wrap px-4 py-2 border-b border-neutral-800 bg-neutral-900">
@@ -176,6 +190,74 @@ pre { overflow: auto; }
   </header>
   <pre id="log" class="flex-1 overflow-auto p-4 {{if .WordWrap}}whitespace-pre-wrap break-all{{else}}whitespace-pre{{end}}">{{.Logs}}</pre>
 </main>
+
+<script id="sidebar-resize-script">
+const separator = document.getElementById("sidebar-resize");
+const storageKey = "stacker:sidebar-width:" + {{.Config}};
+let preferredWidth = 224;
+let drag = null;
+
+function sidebarWidthBounds(viewportWidth) {
+  return { min: 160, max: Math.max(160, Math.min(560, viewportWidth - 280)) };
+}
+
+function clampSidebarWidthPx(value, viewportWidth) {
+  const { min, max } = sidebarWidthBounds(viewportWidth);
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function applySidebarWidthPx(value, persist) {
+  const width = clampSidebarWidthPx(value, window.innerWidth);
+  document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+  separator.setAttribute("aria-valuenow", String(width));
+  separator.setAttribute("aria-valuemax", String(sidebarWidthBounds(window.innerWidth).max));
+  if (persist) {
+    try { localStorage.setItem(storageKey, String(value)); } catch {}
+  }
+  return width;
+}
+
+try {
+  const saved = localStorage.getItem(storageKey);
+  if (saved !== null && Number.isFinite(Number(saved)) && Number(saved) > 0) preferredWidth = Number(saved);
+} catch {}
+applySidebarWidthPx(preferredWidth, false);
+
+separator.addEventListener("pointerdown", (event) => {
+  if (event.button !== undefined && event.button !== 0) return;
+  drag = { pointerId: event.pointerId, x: event.clientX, width: clampSidebarWidthPx(preferredWidth, window.innerWidth), previous: preferredWidth };
+  separator.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+separator.addEventListener("pointermove", (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  preferredWidth = drag.width + event.clientX - drag.x;
+  applySidebarWidthPx(preferredWidth, false);
+});
+separator.addEventListener("pointerup", (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  preferredWidth = drag.width + event.clientX - drag.x;
+  applySidebarWidthPx(preferredWidth, true);
+  drag = null;
+  try { separator.releasePointerCapture(event.pointerId); } catch {}
+});
+separator.addEventListener("pointercancel", (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  preferredWidth = drag.previous;
+  applySidebarWidthPx(preferredWidth, false);
+  drag = null;
+  try { separator.releasePointerCapture(event.pointerId); } catch {}
+});
+separator.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowLeft") preferredWidth = clampSidebarWidthPx(preferredWidth, window.innerWidth) - 16;
+  else if (event.key === "ArrowRight") preferredWidth = clampSidebarWidthPx(preferredWidth, window.innerWidth) + 16;
+  else if (event.key === "Home") preferredWidth = 224;
+  else return;
+  applySidebarWidthPx(preferredWidth, true);
+  event.preventDefault();
+});
+window.addEventListener("resize", () => applySidebarWidthPx(preferredWidth, false));
+</script>
 
 <script>
 const currentName = {{.Name}};

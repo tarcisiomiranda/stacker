@@ -1,7 +1,7 @@
-last_updated: 2026-09-24
+last_updated: 2026-09-29
 
 domain: processes
-description: Process configuration, lifecycle supervision, grouped terminal UI and web index/log sidebar with horizontal group-header dividers and `−/+` fold markers, implicit `Other` fallback, first-appearance ordering within service/task tiers, persisted web and attach section folding, session group picking with current-group highlighting, full-choice arrow/vi-key navigation, enter selection and digit shortcuts, group-aware mixed service/task ordering, web and control-plane actions (group action results list affected members under `affected`), log capture, CLI control plane, free-port, live YAML reload, serve/attach, and instance disambiguation.
+description: Process configuration, lifecycle supervision, grouped terminal UI and web index/log sidebar with horizontal group-header dividers and `−/+` fold markers, implicit `Other` fallback, first-appearance ordering within service/task tiers, scrollable session/attach process lists that keep selection visible, persisted section folding and sidebar width in session/attach, session-only dual log comparison with stacked or side-by-side panes and independent focus, scroll, wrap, auto-scroll pause and selection, session group picking with full-choice navigation and digit shortcuts, web log viewer resizable sidebar and dark thin scrollbars, group-aware mixed service/task ordering, web and control-plane actions (group action results list affected members under `affected`), log capture, CLI control plane, free-port, live YAML reload, serve/attach, and instance disambiguation.
 
 models:
   - name: Config
@@ -42,11 +42,20 @@ models:
     path: cmd/stacker/sections.go
   - name: sectionSummary
     path: cmd/stacker/sections.go
-  - name: CollapsedSectionState
+  - name: cachedUIState
     path: cmd/stacker/uistate.go
     fields:
       - name: collapsed
         type: string[]
+      - name: sidebar_width
+        type: integer
+        optional: true
+  - name: paneRect
+    path: cmd/stacker/tui_layout.go
+  - name: splitOrientation
+    path: cmd/stacker/tui_layout.go
+  - name: logPaneState
+    path: cmd/stacker/tui_logpane.go
   - name: groupActionMsg
     path: cmd/stacker/groups.go
   - name: InstanceState
@@ -161,6 +170,14 @@ frontend:
       path: cmd/stacker/groups.go
     - name: Log panel
       path: cmd/stacker/main.go
+    - name: Session dual log comparison and picker
+      path: cmd/stacker/tui_compare.go
+    - name: Per-pane log viewport and paused scroll anchor
+      path: cmd/stacker/tui_logpane.go
+    - name: Session and attach resizable sidebar
+      path: cmd/stacker/tui_layout.go
+    - name: Session and attach scrollable process list
+      path: cmd/stacker/tui_sidebar.go
     - name: Help overlay
       path: cmd/stacker/main.go
     - name: Grouped attach TUI list and folding
@@ -169,6 +186,8 @@ frontend:
       path: cmd/stacker/picker.go
     - name: Grouped web sidebar and fold state
       path: cmd/stacker/web.go
+    - name: Web log viewer resizable sidebar and dark scrollbar
+      path: cmd/stacker/templates/logs.html
     - name: Shell completion scripts (bash, zsh, fish)
       path: cmd/stacker/completions
   types: []

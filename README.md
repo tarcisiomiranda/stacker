@@ -173,6 +173,9 @@ Standalone task fields:
 - **Color** changes (TUI `c`, web selector) and **order** changes (TUI `Shift+↑/↓`, web drag) are written back to `stacker.yml`, preserving comments and formatting — so the file is not static while Stacker runs.
 - **Groups** use trimmed `group:` labels shared by services and standalone tasks. Sections retain first-appearance order among service-bearing groups, followed by task-only groups; `Other` is always last. Within a section, services precede standalone tasks and each YAML mapping's key order is preserved. Missing or empty groups share `Other`; its header is hidden only when every entry is ungrouped, while an explicit `group: Other` makes the shared section visible.
 - **Section folds and actions** are available in the session and attach TUIs (`←`/`h` folds, `→`/`l` unfolds, click a header to toggle). Fold state persists per config in Stacker's user cache; the web sidebar remembers folds in browser local storage per config. On a TUI header, `Enter` starts, `s` stops, `r` restarts, and `Space` marks the section. Start/stop/restart affect service members; marking affects active services and standalone tasks. The web sidebar provides group Start/Stop/Restart buttons.
+- **TUI sidebar width** can be changed in session or attach with `[` and `]` or by dragging the divider between processes and logs; the width is remembered per config alongside section folds.
+- **Long TUI process lists** scroll within the sidebar in both session and attach; use the wheel over the list or `↑`/`↓` to keep the selected entry visible. The log panes scroll independently when the wheel is over them.
+- **Two logs in the session TUI** use `v` to choose a second service or standalone task, `V` to switch between stacked and side-by-side layouts, and `Tab` to focus one pane. Wheel input focuses the pane underneath it; `p` pauses only that pane's auto-scroll (capture continues), while `G` resumes at the bottom. `Esc` clears a text selection first, then closes comparison. Attach remains a single-log TUI.
 - **Group assignment and reordering** use session TUI `g` to assign or remove a configured member's group (the current group or `none` is highlighted; `↑/k` and `↓/j` navigate all picker choices, `enter` selects, digits `1`–`9` shortcut the first nine groups, and `0` removes the group), or web drag-and-drop to move entries between sections; both update `stacker.yml`. Session TUI `Shift+↑/↓` moves a header within its service-bearing or task-only tier, or a member within the same-kind entries in its section. `Other` stays last.
 - **Error highlighting** (`highlight_errors: true`) matches every captured line against built-in patterns (Python tracebacks, Go panics, JS/TS `Error:`, `npm ERR!`, Rust `error[`, `ERROR`/`FATAL` levels). On a match the status turns orange with a `!` badge and the log title shows the count, even while running. Restart or a mark (`space`) clears it. It's one regex per line and only runs when enabled. The web `error badge` checkbox toggles it and persists the choice.
 
@@ -194,12 +197,16 @@ The footer stays minimal (`? help • q quit`); press `?` for the full overlay.
 | `m` | Mark every running process |
 | `t` | Open the one-shot task picker (`1`–`9` to run) |
 | `W` | Toggle word wrap |
+| `v` / `V` | Choose a second log / switch stacked and side-by-side layout (session TUI) |
+| `Tab` / `p` | Focus another log pane / pause or resume its auto-scroll (session TUI) |
+| `[` / `]` or drag divider | Narrow / widen the process sidebar (session and attach) |
 | `c` | Cycle the process's color dot (saved to YAML) |
 | `w` | Toggle the web log viewer |
 | `?` | Help overlay |
-| wheel / `PgUp` / `PgDn` | Scroll logs |
+| wheel over sidebar / wheel over logs | Scroll the process list / scroll and focus the log pane under the cursor |
+| `PgUp` / `PgDn` | Scroll the focused log pane |
 | drag / release | Select lines / copy (or `Ctrl+C` while selected) |
-| `G` or `End` | Jump to the bottom |
+| `G` or `End` | Jump to the bottom of the focused pane and resume auto-scroll |
 | `Esc` | Clear the selection |
 | `q` | Quit |
 
@@ -221,6 +228,8 @@ Because a wildcard bind is not a destination, Stacker has to pick the host for t
 | `ui.web_host` set explicitly | Exactly what you configured |
 
 The page has a sidebar of processes (drag to reorder) and standalone tasks (`▶`). When any entry has an explicit `group`, the sidebar displays foldable sections in the same group order as the TUI; missing groups appear under `Other`, and the header is hidden only when every entry is ungrouped. Section headers offer Start, Stop, and Restart for their service members. Fold state is stored in browser local storage per config. Dragging an entry between sections changes its group; reordering and group changes are saved to `stacker.yml`.
+
+On a log page, drag the divider between the process list and logs to resize the sidebar. It starts at 224 px and remembers your preferred width per config in browser local storage. Focus the divider and press `←`/`→` for 16 px steps or `Home` to restore the default. The process list and log scrollbars use a thin, dark style; when browser storage is unavailable, resizing still works for the open page.
 
 The group APIs are `POST /api/{name}/group` with `{"group":"name"}` (send an empty string to remove the assignment; the response returns the updated process in `process`) and `POST /api/groups/{start|stop|restart}` with `{"group":"name"}` (the response includes the group and action plus affected member names in `affected`, including on action errors).
 

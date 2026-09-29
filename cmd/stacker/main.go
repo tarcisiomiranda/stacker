@@ -909,24 +909,27 @@ type colorSavedMsg struct {
 type orderSavedMsg struct{ err error }
 
 type model struct {
-	cfg           Config
-	processes     []*Process
-	selected      int
-	collapsed     map[string]bool
-	collapsedPath string
-	width         int
-	height        int
-	logOffset     int
-	follow        bool
-	wrap          bool
-	showHelp      bool
-	showTasks     bool
-	showGroups    bool
-	groupChoice   int
-
-	selecting bool
-	selStart  int
-	selEnd    int
+	cfg                   Config
+	processes             []*Process
+	selected              int
+	listOffset            int
+	collapsed             map[string]bool
+	collapsedPath         string
+	width                 int
+	height                int
+	preferredSidebarWidth int
+	resizingSidebar       bool
+	primaryPane           logPaneState
+	secondaryPane         logPaneState
+	secondaryName         string
+	activePane            int
+	requestedOrientation  splitOrientation
+	showHelp              bool
+	showTasks             bool
+	showGroups            bool
+	showLogPicker         bool
+	logChoice             int
+	groupChoice           int
 
 	statusText string
 	refreshCh  chan struct{}
@@ -1024,17 +1027,16 @@ func newModel(cfg Config) *model {
 		cfg.UI.WheelLines = 3
 	}
 	m := &model{
-		cfg:       cfg,
-		selected:  -1,
-		collapsed: make(map[string]bool),
-		follow:    true,
-		wrap:      cfg.UI.WordWrap,
-		selStart:  -1,
-		selEnd:    -1,
-		refreshCh: make(chan struct{}, 1),
-		watchStop: make(chan struct{}),
-		shutdown:  make(chan struct{}),
-		mode:      "session",
+		cfg:                  cfg,
+		selected:             -1,
+		collapsed:            make(map[string]bool),
+		primaryPane:          logPaneState{Follow: true, Wrap: cfg.UI.WordWrap, SelStart: -1, SelEnd: -1},
+		secondaryPane:        logPaneState{Follow: true, Wrap: cfg.UI.WordWrap, SelStart: -1, SelEnd: -1},
+		requestedOrientation: stackedOrientation,
+		refreshCh:            make(chan struct{}, 1),
+		watchStop:            make(chan struct{}),
+		shutdown:             make(chan struct{}),
+		mode:                 "session",
 	}
 	m.hlErr.Store(cfg.UI.HighlightErrors)
 	names := orderedNames(cfg)
@@ -1133,8 +1135,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyPendingOrder()
 		m.applyPendingConfig()
 		m.pruneOrphans()
-		if m.follow {
+		m.reconcileSecondary()
+		if m.primaryPane.Follow {
 			m.scrollToBottom()
+		}
+		if secondary := m.processByName(m.secondaryName); secondary != nil && m.secondaryName != "" && m.secondaryPane.Follow {
+			_, rect, _, visible := logPaneRects(m.width, m.height, m.leftWidth(), m.requestedOrientation)
+			if visible {
+				followLogPane(secondary, &m.secondaryPane, rect)
+			}
+		}
+		if m.primaryPane.Evicted || m.secondaryPane.Evicted {
+			m.statusText = "Older log lines were discarded; showing the oldest retained line"
+			m.primaryPane.Evicted = false
+			m.secondaryPane.Evicted = false
 		}
 		return m, m.waitRefresh()
 	case groupActionMsg:
@@ -1187,6 +1201,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showGroups {
 			return m, m.handleGroupKey(msg.String())
 		}
+		if m.showLogPicker {
+			m.handleLogPickerKey(msg.String())
+			return m, nil
+		}
 		switch msg.String() {
 		case "q":
 			return m, m.stopAllCmd()
@@ -1199,16 +1217,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selected > 0 {
 				m.selected--
 				m.resetLogView()
+				m.reconcileSecondary()
 			}
 		case "down", "j":
 			if m.selected+1 < len(m.rows()) {
 				m.selected++
 				m.resetLogView()
+				m.reconcileSecondary()
 			}
 		case "left", "h":
 			m.foldSelectedSection(true)
 		case "right", "l":
 			m.foldSelectedSection(false)
+		case "[":
+			m.resizeSidebar(-2)
+		case "]":
+			m.resizeSidebar(2)
 		case "s":
 			if section := m.selectedSection(); section != nil {
 				return m, m.groupActionCmd(section.Name, "stop")
@@ -1231,6 +1255,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p.Restart(m.notify)
 			}
 		case " ":
+			if p, pane := m.activeLogPane(); p != nil && pane == &m.secondaryPane {
+				p.Mark()
+				m.notify()
+				break
+			}
 			if section := m.selectedSection(); section != nil {
 				return m, m.groupActionCmd(section.Name, "mark")
 			}
@@ -1275,19 +1304,49 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+down", "J":
 			return m, m.moveSelectedCmd(1)
 		case "W":
-			m.wrap = !m.wrap
-			if m.follow {
-				m.scrollToBottom()
+			p, pane := m.activeLogPane()
+			pane.Wrap = !pane.Wrap
+			if p != nil && pane.Follow {
+				followLogPane(p, pane, m.activePaneRect())
 			}
-			if m.wrap {
+			if pane.Wrap {
 				m.statusText = "Word wrap on"
 			} else {
 				m.statusText = "Word wrap off"
+			}
+		case "p":
+			p, pane := m.activeLogPane()
+			if p != nil {
+				if pane.Follow {
+					pane.Follow = false
+					pane.ExplicitPause = true
+					m.statusText = "Auto-scroll paused: " + p.Name
+				} else {
+					followLogPane(p, pane, m.activePaneRect())
+					m.statusText = "Following logs: " + p.Name
+				}
+			}
+		case "tab":
+			if m.secondaryName != "" {
+				_, _, _, visible := logPaneRects(m.width, m.height, m.leftWidth(), m.requestedOrientation)
+				if visible {
+					m.activePane = 1 - m.activePane
+				}
 			}
 		case "c":
 			return m, m.cycleColorCmd()
 		case "g":
 			m.openGroupPicker()
+		case "v":
+			m.openLogPicker()
+		case "V":
+			if m.secondaryName != "" {
+				if m.requestedOrientation == stackedOrientation {
+					m.requestedOrientation = sideBySideOrientation
+				} else {
+					m.requestedOrientation = stackedOrientation
+				}
+			}
 		case "t":
 			if p := m.current(); p != nil {
 				if len(p.Config.Tasks) == 0 {
@@ -1303,14 +1362,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			m.showHelp = true
 		case "pgup":
-			m.scrollLogs(-m.visibleLogLines())
+			m.scrollActivePane(-paneVisibleLines(m.activePaneRect()))
 		case "pgdown":
-			m.scrollLogs(m.visibleLogLines())
+			m.scrollActivePane(paneVisibleLines(m.activePaneRect()))
 		case "end", "G":
-			m.follow = true
-			m.scrollToBottom()
+			if p, pane := m.activeLogPane(); p != nil {
+				followLogPane(p, pane, m.activePaneRect())
+			}
 		case "esc":
-			m.clearSelection()
+			if m.hasSelection() {
+				m.clearSelection()
+			} else if m.secondaryName != "" {
+				m.secondaryName = ""
+				m.activePane = 0
+			}
 		}
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1320,30 +1385,62 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	leftWidth := m.leftWidth()
-	logX := leftWidth + 1
-	logTop := 2
-	logBottom := logTop + m.visibleLogLines() - 1
-	insideLogs := msg.X >= logX && msg.Y >= logTop && msg.Y <= logBottom
-
+	if m.resizingSidebar {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			m.preferredSidebarWidth = clampSidebarWidth(m.width, msg.X+1, leftWidth)
+		case tea.MouseActionRelease:
+			m.preferredSidebarWidth = clampSidebarWidth(m.width, msg.X+1, leftWidth)
+			m.resizingSidebar = false
+			m.saveSidebarWidth()
+		}
+		return m, nil
+	}
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y < m.height-2 && msg.X >= leftWidth-1 && msg.X <= leftWidth {
+		m.resizingSidebar = true
+		return m, nil
+	}
 	if msg.Action == tea.MouseActionPress {
+		visibleRows := sidebarVisibleRows(m.height, len(m.rows()))
+		if msg.X < leftWidth && msg.Y >= 2 && msg.Y < 2+visibleRows && len(m.rows()) > 0 {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+				delta := m.cfg.UI.WheelLines
+				if msg.Button == tea.MouseButtonWheelUp {
+					delta = -delta
+				}
+				m.listOffset = sidebarScrollOffset(m.listOffset, len(m.rows()), visibleRows, delta)
+				selected := clamp(m.selected, m.listOffset, min(len(m.rows())-1, m.listOffset+visibleRows-1))
+				if selected != m.selected {
+					m.selected = selected
+					m.resetLogView()
+					m.reconcileSecondary()
+				}
+				return m, nil
+			}
+		}
+		p, pane, rect, index, insideLogs := m.paneAt(msg.X, msg.Y)
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			if insideLogs {
-				m.scrollLogs(-m.cfg.UI.WheelLines)
+			if insideLogs && p != nil {
+				m.activePane = index
+				scrollLogPane(p, pane, rect, -m.cfg.UI.WheelLines)
 			}
 		case tea.MouseButtonWheelDown:
-			if insideLogs {
-				m.scrollLogs(m.cfg.UI.WheelLines)
+			if insideLogs && p != nil {
+				m.activePane = index
+				scrollLogPane(p, pane, rect, m.cfg.UI.WheelLines)
 			}
 		case tea.MouseButtonLeft:
-			if insideLogs {
-				line := m.mouseLogLine(msg.Y)
-				m.selecting = true
-				m.selStart, m.selEnd = line, line
-			} else if msg.X < leftWidth {
+			if insideLogs && p != nil {
+				m.activePane = index
+				line := paneMouseLine(p, pane, rect, msg.Y)
+				pane.Selecting = true
+				pane.SelStart, pane.SelEnd = line, line
+			} else if msg.X < leftWidth && (m.height <= 0 || msg.Y >= 2 && msg.Y < 2+visibleRows) {
 				rows := m.rows()
 				if len(rows) > 0 {
-					idx := clamp(msg.Y-2, 0, len(rows)-1)
+					idx := clamp(m.listOffset+msg.Y-2, 0, len(rows)-1)
 					m.selected = idx
 					if rows[idx].Header != nil {
 						if m.collapsed == nil {
@@ -1354,25 +1451,32 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 						m.persistCollapsedState()
 					}
 					m.resetLogView()
+					m.reconcileSecondary()
 				}
 			}
 		}
 	}
 
-	if msg.Action == tea.MouseActionMotion && m.selecting {
-		line := m.mouseLogLine(clamp(msg.Y, logTop, logBottom))
-		m.selEnd = line
-		if msg.Y < logTop {
-			m.scrollLogs(-1)
-		} else if msg.Y > logBottom {
-			m.scrollLogs(1)
+	if msg.Action == tea.MouseActionMotion {
+		p, pane := m.activeLogPane()
+		if p != nil && pane.Selecting {
+			rect := m.activePaneRect()
+			pane.SelEnd = paneMouseLine(p, pane, rect, clamp(msg.Y, rect.Y+2, rect.Y+rect.Height-2))
+			if msg.Y < rect.Y+2 {
+				scrollLogPane(p, pane, rect, -1)
+			} else if msg.Y > rect.Y+rect.Height-2 {
+				scrollLogPane(p, pane, rect, 1)
+			}
 		}
 	}
 
-	if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft && m.selecting {
-		m.selecting = false
-		if m.cfg.UI.CopyOnRelease && m.hasSelection() {
-			return m, m.copySelectionCmd()
+	if msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
+		_, pane := m.activeLogPane()
+		if pane.Selecting {
+			pane.Selecting = false
+			if m.cfg.UI.CopyOnRelease && m.hasSelection() {
+				return m, m.copySelectionCmd()
+			}
 		}
 	}
 	return m, nil
@@ -1398,9 +1502,43 @@ func (m *model) View() string {
 	if m.showGroups {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.groupsView())
 	}
+	if m.showLogPicker {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.logPickerView())
+	}
 
 	left := panelStyle.Width(leftWidth - 3).Height(bodyHeight - 2).Render(m.processList())
-	right := panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
+	right := ""
+	footerNotice := ""
+	if secondary := m.processByName(m.secondaryName); secondary != nil && m.secondaryName != "" {
+		primaryRect, secondaryRect, orientation, visible := logPaneRects(m.width, m.height, leftWidth, m.requestedOrientation)
+		if visible {
+			primaryContent := ""
+			if p := m.current(); p != nil {
+				primaryContent = renderLogPane(p, &m.primaryPane, primaryRect, m.activePane == 0)
+			} else {
+				primaryContent = m.logView()
+			}
+			primaryStyle := panelStyle
+			secondaryStyle := panelStyle
+			if m.activePane == 0 {
+				primaryStyle = primaryStyle.BorderForeground(lipgloss.Color("#38bdf8"))
+			} else {
+				secondaryStyle = secondaryStyle.BorderForeground(lipgloss.Color("#38bdf8"))
+			}
+			first := primaryStyle.Width(primaryRect.Width - 3).Height(primaryRect.Height - 2).Render(primaryContent)
+			second := secondaryStyle.Width(secondaryRect.Width - 3).Height(secondaryRect.Height - 2).Render(renderLogPane(secondary, &m.secondaryPane, secondaryRect, m.activePane == 1))
+			if orientation == sideBySideOrientation {
+				right = lipgloss.JoinHorizontal(lipgloss.Top, first, second)
+			} else {
+				right = lipgloss.JoinVertical(lipgloss.Left, first, second)
+			}
+		} else {
+			footerNotice = "Terminal too short for two log panels; enlarge to restore comparison"
+		}
+	}
+	if right == "" {
+		right = panelStyle.Width(rightWidth - 3).Height(bodyHeight - 2).Render(m.logView())
+	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	// Primary actions stay fixed in the footer so stop/restart/free-port/web
@@ -1409,7 +1547,20 @@ func (m *model) View() string {
 	if m.statusText != "" {
 		footer = m.statusText + "  " + footer
 	}
+	if footerNotice != "" {
+		footer = footerNotice + "  " + footer
+	}
 	return body + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
+}
+
+func (m *model) activeLogPane() (*Process, *logPaneState) {
+	if m.secondaryName != "" && m.activePane == 1 {
+		_, _, visible := m.visiblePaneRects()
+		if p := m.processByName(m.secondaryName); p != nil && visible {
+			return p, &m.secondaryPane
+		}
+	}
+	return m.current(), &m.primaryPane
 }
 
 // keycap renders a keyboard shortcut as a small chip, e.g. [s].
@@ -1439,6 +1590,11 @@ func (m *model) footerView() string {
 			parts = append(parts, keycap("b")+" build")
 		}
 	}
+	if m.secondaryName != "" {
+		parts = append(parts, keycap("Tab")+" focus", keycap("p")+" pause")
+	} else {
+		parts = append(parts, keycap("v")+" compare")
+	}
 	parts = append(parts, keycap("?")+" help", keycap("q")+" quit")
 	return strings.Join(parts, mutedStyle.Render(" · "))
 }
@@ -1463,6 +1619,7 @@ func (m *model) helpView() string {
 			title: "Process",
 			rows: [][2]string{
 				{"↑/k ↓/j", "select process"},
+				{"wheel", "scroll process list under mouse"},
 				{"shift+↑/↓", "move process (saved to YAML)"},
 				{"enter", "start (▶ tasks: run once)"},
 				{"t", "run a task (one-shot command)"},
@@ -1484,10 +1641,15 @@ func (m *model) helpView() string {
 		{
 			title: "Logs",
 			rows: [][2]string{
+				{"v", "choose a second log (service or standalone task)"},
+				{"V", "toggle stacked / side-by-side orientation"},
+				{"Tab", "focus the other log pane"},
+				{"p", "pause / resume auto-scroll in focused log"},
+				{"[/]", "resize process sidebar (or drag divider)"},
 				{"space", "mark selected"},
 				{"m", "mark all running"},
 				{"W", "toggle word wrap"},
-				{"wheel", "scroll logs"},
+				{"wheel", "focus pane under mouse and scroll logs"},
 				{"drag", "select lines (copy)"},
 				{"pgup/pgdn", "page logs"},
 				{"G / end", "follow bottom"},
@@ -1641,7 +1803,10 @@ func (m *model) processList() string {
 	b.WriteString("\n")
 	procs := m.procs()
 	rows := m.rowsFor(procs)
-	for i, row := range rows {
+	visibleRows := sidebarVisibleRows(m.height, len(rows))
+	m.listOffset = sidebarSelectionOffset(m.listOffset, m.selected, len(rows), visibleRows)
+	for i := m.listOffset; i < len(rows) && i < m.listOffset+visibleRows; i++ {
+		row := rows[i]
 		if row.Header != nil {
 			summary := summarizeProcessSection(row.Header, procs)
 			b.WriteString(formatSectionHeader(
@@ -1675,7 +1840,7 @@ func (m *model) processList() string {
 			})
 			b.WriteString(line)
 		}
-		if i+1 < len(rows) {
+		if i+1 < len(rows) && i+1 < m.listOffset+visibleRows {
 			b.WriteByte('\n')
 		}
 	}
@@ -1850,36 +2015,7 @@ func (m *model) logView() string {
 		}
 		return "No processes configured"
 	}
-	vis := m.visualLines(p.Logs(), m.logWidth())
-	visibleLines := m.visibleLogLines()
-	maxOffset := max(0, len(vis)-visibleLines)
-	m.logOffset = clamp(m.logOffset, 0, maxOffset)
-	end := min(len(vis), m.logOffset+visibleLines)
-
-	var b strings.Builder
-	title := fmt.Sprintf("Logs: %s [%s]", sanitizeLogLine(p.Name), p.Status())
-	if errs := p.Errors(); errs > 0 {
-		title += fmt.Sprintf(" — %d error line(s); space clears", errs)
-	}
-	if m.wrap {
-		title += " — wrap"
-	}
-	if !m.follow {
-		title += " — paused; press G for bottom"
-	}
-	b.WriteString(titleStyle.Render(truncate(title, m.logWidth())))
-	b.WriteByte('\n')
-	for i := m.logOffset; i < end; i++ {
-		line := vis[i].text
-		if m.isSelected(vis[i].idx) {
-			line = selectionStyle.Render(line)
-		}
-		b.WriteString(line)
-		if i+1 < end {
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
+	return renderLogPane(p, &m.primaryPane, paneRect{Width: max(20, m.width-m.leftWidth()-1), Height: max(5, m.height-2)}, true)
 }
 
 // visLine is one rendered log row: with wrap on, a long log line becomes
@@ -1892,7 +2028,7 @@ type visLine struct {
 func (m *model) visualLines(logs []string, width int) []visLine {
 	out := make([]visLine, 0, len(logs))
 	for i, line := range logs {
-		if !m.wrap || ansi.StringWidth(line) <= width {
+		if !m.primaryPane.Wrap || ansi.StringWidth(line) <= width {
 			out = append(out, visLine{text: truncate(line, width), idx: i})
 			continue
 		}
@@ -2090,10 +2226,25 @@ func (m *model) selectFirstService() {
 }
 
 func (m *model) leftWidth() int {
+	fallback := min(34, m.width/3)
 	if m.width < 70 {
-		return max(24, m.width/3)
+		fallback = max(24, m.width/3)
 	}
-	return min(34, m.width/3)
+	return clampSidebarWidth(m.width, m.preferredSidebarWidth, fallback)
+}
+
+func (m *model) resizeSidebar(delta int) {
+	m.preferredSidebarWidth = clampSidebarWidth(m.width, m.leftWidth()+delta, m.leftWidth())
+	m.saveSidebarWidth()
+}
+
+func (m *model) saveSidebarWidth() {
+	if m.collapsedPath == "" {
+		return
+	}
+	if err := saveSidebarWidth(m.collapsedPath, m.preferredSidebarWidth); err != nil {
+		m.statusText = "Sidebar width save failed: " + err.Error()
+	}
 }
 
 func (m *model) logHeight() int { return max(3, m.height-5) }
@@ -2103,37 +2254,38 @@ func (m *model) visibleLogLines() int { return max(1, m.logHeight()-1) }
 // mouseLogLine maps a screen row to the logical log index under it, going
 // through the wrapped rows so selection works with word wrap on.
 func (m *model) mouseLogLine(y int) int {
-	row := max(0, m.logOffset+(y-2))
 	p := m.current()
 	if p == nil {
-		return row
-	}
-	vis := m.visualLines(p.Logs(), m.logWidth())
-	if len(vis) == 0 {
 		return 0
 	}
-	return vis[min(row, len(vis)-1)].idx
+	rect := paneRect{Width: max(20, m.width-m.leftWidth()-1), Height: max(5, m.height-2)}
+	visual, start, _ := paneVisualLines(p, rect, m.primaryPane.Wrap)
+	if len(visual) == 0 {
+		return 0
+	}
+	row := paneTopIndex(visual, &m.primaryPane, start, paneVisibleLines(rect)) + max(0, y-2)
+	return visual[min(row, len(visual)-1)].line
 }
 
 func (m *model) scrollLogs(delta int) {
-	if m.current() == nil {
-		return
+	if p := m.current(); p != nil {
+		scrollLogPane(p, &m.primaryPane, paneRect{Width: max(20, m.width-m.leftWidth()-1), Height: max(5, m.height-2)}, delta)
 	}
-	maxOffset := max(0, m.totalVisualLines()-m.visibleLogLines())
-	m.logOffset = clamp(m.logOffset+delta, 0, maxOffset)
-	m.follow = m.logOffset >= maxOffset
 }
 
 func (m *model) scrollToBottom() {
-	if m.current() == nil {
-		return
+	if p := m.current(); p != nil {
+		rect := paneRect{Width: max(20, m.width-m.leftWidth()-1), Height: max(5, m.height-2)}
+		visual, _, _ := paneVisualLines(p, rect, m.primaryPane.Wrap)
+		paneSetTop(&m.primaryPane, visual, max(0, len(visual)-paneVisibleLines(rect)))
 	}
-	m.logOffset = max(0, m.totalVisualLines()-m.visibleLogLines())
 }
 
 func (m *model) resetLogView() {
-	m.clearSelection()
-	m.follow = true
+	m.primaryPane.Selecting = false
+	m.primaryPane.SelStart, m.primaryPane.SelEnd = -1, -1
+	m.primaryPane.Follow = true
+	m.primaryPane.ExplicitPause = false
 	m.scrollToBottom()
 }
 
@@ -2152,13 +2304,17 @@ func (m *model) markAllRunning() int {
 	return n
 }
 
-func (m *model) hasSelection() bool { return m.selStart >= 0 && m.selEnd >= 0 }
+func (m *model) hasSelection() bool {
+	_, pane := m.activeLogPane()
+	return pane.SelStart >= 0 && pane.SelEnd >= 0
+}
 
 func (m *model) isSelected(line int) bool {
 	if !m.hasSelection() {
 		return false
 	}
-	start, end := m.selStart, m.selEnd
+	_, pane := m.activeLogPane()
+	start, end := pane.SelStart, pane.SelEnd
 	if start > end {
 		start, end = end, start
 	}
@@ -2166,26 +2322,17 @@ func (m *model) isSelected(line int) bool {
 }
 
 func (m *model) clearSelection() {
-	m.selecting = false
-	m.selStart, m.selEnd = -1, -1
+	_, pane := m.activeLogPane()
+	pane.Selecting = false
+	pane.SelStart, pane.SelEnd = -1, -1
 }
 
 func (m *model) selectedText() (string, int) {
-	p := m.current()
+	p, pane := m.activeLogPane()
 	if p == nil || !m.hasSelection() {
 		return "", 0
 	}
-	logs := p.Logs()
-	start, end := m.selStart, m.selEnd
-	if start > end {
-		start, end = end, start
-	}
-	start = clamp(start, 0, max(0, len(logs)-1))
-	end = clamp(end, 0, max(0, len(logs)-1))
-	if len(logs) == 0 || start > end {
-		return "", 0
-	}
-	return strings.Join(logs[start:end+1], "\n"), end - start + 1
+	return selectedPaneText(p, pane)
 }
 
 func (m *model) copySelectionCmd() tea.Cmd {
@@ -2711,6 +2858,9 @@ func runSession(configPath string) int {
 	if statePath, stateErr := uiStatePath(m.configPath); stateErr == nil {
 		m.collapsedPath = statePath
 		m.collapsed = loadCollapsedOrEmpty(statePath)
+		if state, err := loadUIState(statePath); err == nil {
+			m.preferredSidebarWidth = state.SidebarWidth
+		}
 	} else {
 		m.collapsed = make(map[string]bool)
 	}
