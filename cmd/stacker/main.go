@@ -924,6 +924,10 @@ type model struct {
 	secondaryName         string
 	activePane            int
 	requestedOrientation  splitOrientation
+	stackedShare          float64
+	sideShare             float64
+	resizingPane          bool
+	resizingOrientation   splitOrientation
 	showHelp              bool
 	showTasks             bool
 	showGroups            bool
@@ -1033,6 +1037,8 @@ func newModel(cfg Config) *model {
 		primaryPane:          logPaneState{Follow: true, Wrap: cfg.UI.WordWrap, SelStart: -1, SelEnd: -1},
 		secondaryPane:        logPaneState{Follow: true, Wrap: cfg.UI.WordWrap, SelStart: -1, SelEnd: -1},
 		requestedOrientation: stackedOrientation,
+		stackedShare:         0.5,
+		sideShare:            0.5,
 		refreshCh:            make(chan struct{}, 1),
 		watchStop:            make(chan struct{}),
 		shutdown:             make(chan struct{}),
@@ -1131,6 +1137,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.resizingPane = false
 	case refreshMsg:
 		m.applyPendingOrder()
 		m.applyPendingConfig()
@@ -1140,7 +1147,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollToBottom()
 		}
 		if secondary := m.processByName(m.secondaryName); secondary != nil && m.secondaryName != "" && m.secondaryPane.Follow {
-			_, rect, _, visible := logPaneRects(m.width, m.height, m.leftWidth(), m.requestedOrientation)
+			_, rect, _, visible := m.comparisonRects()
 			if visible {
 				followLogPane(secondary, &m.secondaryPane, rect)
 			}
@@ -1233,6 +1240,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeSidebar(-2)
 		case "]":
 			m.resizeSidebar(2)
+		case "+", "-":
+			if m.secondaryName != "" {
+				delta := 2
+				if msg.String() == "-" {
+					delta = -delta
+				}
+				m.resizeComparedPane(delta)
+			}
 		case "s":
 			if section := m.selectedSection(); section != nil {
 				return m, m.groupActionCmd(section.Name, "stop")
@@ -1328,7 +1343,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "tab":
 			if m.secondaryName != "" {
-				_, _, _, visible := logPaneRects(m.width, m.height, m.leftWidth(), m.requestedOrientation)
+				_, _, _, visible := m.comparisonRects()
 				if visible {
 					m.activePane = 1 - m.activePane
 				}
@@ -1399,6 +1414,23 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y < m.height-2 && msg.X >= leftWidth-1 && msg.X <= leftWidth {
 		m.resizingSidebar = true
 		return m, nil
+	}
+	if m.resizingPane {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			m.resizeComparedPaneAt(msg.X, msg.Y)
+		case tea.MouseActionRelease:
+			m.resizeComparedPaneAt(msg.X, msg.Y)
+			m.resizingPane = false
+		}
+		return m, nil
+	}
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		if orientation, ok := m.paneDividerAt(msg.X, msg.Y); ok {
+			m.resizingPane = true
+			m.resizingOrientation = orientation
+			return m, nil
+		}
 	}
 	if msg.Action == tea.MouseActionPress {
 		visibleRows := sidebarVisibleRows(m.height, len(m.rows()))
@@ -1510,7 +1542,7 @@ func (m *model) View() string {
 	right := ""
 	footerNotice := ""
 	if secondary := m.processByName(m.secondaryName); secondary != nil && m.secondaryName != "" {
-		primaryRect, secondaryRect, orientation, visible := logPaneRects(m.width, m.height, leftWidth, m.requestedOrientation)
+		primaryRect, secondaryRect, orientation, visible := m.comparisonRects()
 		if visible {
 			primaryContent := ""
 			if p := m.current(); p != nil {
@@ -1644,6 +1676,8 @@ func (m *model) helpView() string {
 				{"v", "choose a second log (service or standalone task)"},
 				{"V", "toggle stacked / side-by-side orientation"},
 				{"Tab", "focus the other log pane"},
+				{"+/-", "resize focused log pane by two cells"},
+				{"drag", "drag log divider to resize both panes"},
 				{"p", "pause / resume auto-scroll in focused log"},
 				{"[/]", "resize process sidebar (or drag divider)"},
 				{"space", "mark selected"},

@@ -1,0 +1,12 @@
+tag: v0.16.0
+previous: v0.15.0
+
+highlights: |
+  Give each log the space it needs when comparing two services or standalone
+  tasks in the session TUI. Resize the divider by mouse or keyboard without
+  losing the other pane or the layout chosen for each orientation.
+
+features:
+  - "**Adjustable dual-log split** — drag the divider between two logs to make either pane larger in stacked or side-by-side view"
+  - "**Keyboard resizing** — focus a pane with `Tab`, then use `+` or `-` to grow or shrink it by two rows or columns"
+  - "**Independent layout proportions** — stacked and side-by-side views remember their own split sizes during the session, while enforcing minimum sizes for both logs"

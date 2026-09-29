@@ -1,5 +1,7 @@
 package main
 
+import "math"
+
 type paneRect struct {
 	X, Y, Width, Height int
 }
@@ -23,16 +25,27 @@ func clampSidebarWidth(screenWidth, preferred, fallback int) int {
 }
 
 func logPaneRects(screenWidth, screenHeight, sidebarWidth int, requested splitOrientation) (paneRect, paneRect, splitOrientation, bool) {
+	return logPaneRectsWithShares(screenWidth, screenHeight, sidebarWidth, requested, 0.5, 0.5)
+}
+
+func splitPrimarySize(total int, share float64, minimum int) int {
+	if share <= 0 || math.IsNaN(share) || math.IsInf(share, 0) {
+		share = 0.5
+	}
+	return clamp(int(math.Floor(float64(total)*share+1e-9)), minimum, total-minimum)
+}
+
+func logPaneRectsWithShares(screenWidth, screenHeight, sidebarWidth int, requested splitOrientation, stackedShare, sideShare float64) (paneRect, paneRect, splitOrientation, bool) {
 	width := max(20, screenWidth-sidebarWidth-1)
 	height := max(5, screenHeight-2)
 	primary := paneRect{X: sidebarWidth, Y: 0, Width: width, Height: height}
 	if requested == sideBySideOrientation && width >= 57 {
-		primary.Width = (width - 1) / 2
+		primary.Width = splitPrimarySize(width-1, sideShare, 28)
 		secondary := paneRect{X: primary.X + primary.Width - 1, Y: 0, Width: width - 1 - primary.Width, Height: height}
 		return primary, secondary, sideBySideOrientation, true
 	}
 	if height >= 12 {
-		primary.Height = (height - 1) / 2
+		primary.Height = splitPrimarySize(height-1, stackedShare, 5)
 		secondary := paneRect{X: primary.X, Y: primary.Y + primary.Height, Width: width, Height: height - 1 - primary.Height}
 		return primary, secondary, stackedOrientation, true
 	}

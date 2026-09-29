@@ -107,11 +107,71 @@ func (m *model) visiblePaneRects() (paneRect, paneRect, bool) {
 	if m.secondaryName == "" || m.processByName(m.secondaryName) == nil {
 		return primary, paneRect{}, false
 	}
-	first, second, _, visible := logPaneRects(m.width, m.height, leftWidth, m.requestedOrientation)
+	first, second, _, visible := m.comparisonRects()
 	if !visible {
 		return primary, paneRect{}, false
 	}
 	return first, second, true
+}
+
+func (m *model) comparisonRects() (paneRect, paneRect, splitOrientation, bool) {
+	return logPaneRectsWithShares(m.width, m.height, m.leftWidth(), m.requestedOrientation, m.stackedShare, m.sideShare)
+}
+
+func (m *model) resizeComparedPane(delta int) {
+	primary, secondary, orientation, visible := m.comparisonRects()
+	if !visible {
+		return
+	}
+	if m.activePane == 1 {
+		delta = -delta
+	}
+	if orientation == sideBySideOrientation {
+		m.setPrimaryPaneSize(orientation, primary.Width+delta, primary.Width+secondary.Width)
+	} else {
+		m.setPrimaryPaneSize(orientation, primary.Height+delta, primary.Height+secondary.Height)
+	}
+}
+
+func (m *model) setPrimaryPaneSize(orientation splitOrientation, requested, available int) {
+	minimum := 5
+	if orientation == sideBySideOrientation {
+		minimum = 28
+	}
+	size := clamp(requested, minimum, available-minimum)
+	share := float64(size) / float64(available)
+	if orientation == sideBySideOrientation {
+		m.sideShare = share
+	} else {
+		m.stackedShare = share
+	}
+}
+
+func (m *model) paneDividerAt(x, y int) (splitOrientation, bool) {
+	if m.secondaryName == "" {
+		return "", false
+	}
+	primary, secondary, orientation, visible := m.comparisonRects()
+	if !visible {
+		return "", false
+	}
+	if orientation == sideBySideOrientation {
+		return orientation, x >= secondary.X-2 && x <= secondary.X && y >= 2 && y < primary.Height-1
+	}
+	return orientation, y >= secondary.Y-1 && y <= secondary.Y && x >= primary.X+1 && x < primary.X+primary.Width-1
+}
+
+func (m *model) resizeComparedPaneAt(x, y int) {
+	primary, secondary, orientation, visible := m.comparisonRects()
+	if !visible || orientation != m.resizingOrientation {
+		m.resizingPane = false
+		return
+	}
+	if orientation == sideBySideOrientation {
+		m.setPrimaryPaneSize(orientation, x-primary.X+1, primary.Width+secondary.Width)
+	} else {
+		m.setPrimaryPaneSize(orientation, y-primary.Y, primary.Height+secondary.Height)
+	}
 }
 
 func (m *model) activePaneRect() paneRect {

@@ -245,7 +245,7 @@ func TestStackedComparisonKeepsPausedPrimaryAnchor(t *testing.T) {
 func TestSessionCompareHelpShowsPaneAndResizeKeys(t *testing.T) {
 	m := newModel(Config{})
 	help := ansi.Strip(m.helpView())
-	for _, text := range []string{"second log", "orientation", "auto-scroll", "sidebar", "Tab"} {
+	for _, text := range []string{"second log", "orientation", "auto-scroll", "sidebar", "Tab", "resize focused log pane", "drag log divider"} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("session help missing %q", text)
 		}
