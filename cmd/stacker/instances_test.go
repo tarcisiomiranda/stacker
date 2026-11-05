@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestLabelInstances(t *testing.T) {
 			{Config: "/srv/beta/frontend/stacker.yml"},
 			{Config: "/srv/_cyber_/stacker.yml"},
 		})
-		want := []string{"alpha/frontend", "beta/frontend", "_cyber_"}
+		want := []string{filepath.Join("alpha", "frontend"), filepath.Join("beta", "frontend"), "_cyber_"}
 		if !equalStrings(got, want) {
 			t.Fatalf("labelInstances = %#v, want %#v", got, want)
 		}

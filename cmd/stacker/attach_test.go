@@ -18,6 +18,7 @@ import (
 // has to reach the web viewer through the control plane. It used to be an
 // unhandled key: nothing started, and no URL or port was ever shown.
 func TestAttachWebKeyTogglesViewerAndReportsURL(t *testing.T) {
+	isolateTestCache(t)
 	dir := t.TempDir()
 	cfgPath := writeConfig(t, dir, `
 version: 1
@@ -89,6 +90,7 @@ processes:
 
 // The help overlay is the only place these keys are discoverable.
 func TestAttachHelpListsWebKey(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	if !strings.Contains(am.helpView(), "web logs") {
 		t.Fatalf("attach help does not mention the web viewer:\n%s", am.helpView())
@@ -98,6 +100,7 @@ func TestAttachHelpListsWebKey(t *testing.T) {
 // The footer advertises the primary actions without opening help. The session
 // TUI shows `w web` there, so an attached TUI must match or the key looks absent.
 func TestAttachFooterAdvertisesWebKey(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	if !strings.Contains(am.footerView(), "web") {
 		t.Fatalf("attach footer does not advertise the web key: %q", am.footerView())
@@ -105,6 +108,7 @@ func TestAttachFooterAdvertisesWebKey(t *testing.T) {
 }
 
 func TestAttachSectionsRenderSharedHeadersAndRows(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.width = 100
 	am.procs = []ProcessInfo{
@@ -157,6 +161,7 @@ func TestAttachSectionsRenderSharedHeadersAndRows(t *testing.T) {
 }
 
 func TestAttachSectionHeaderLogViewShowsSummary(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.width = 100
 	am.height = 20
@@ -184,6 +189,7 @@ func TestAttachSectionHeaderLogViewShowsSummary(t *testing.T) {
 }
 
 func TestAttachSnapshotRestoresMemberAndHeaderSelection(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	first := []ProcessInfo{
 		{Name: "migrate", Group: "hub", OneShot: true, Status: string(StatusStopped)},
@@ -235,6 +241,7 @@ func TestAttachSnapshotRestoresMemberAndHeaderSelection(t *testing.T) {
 }
 
 func TestAttachFoldStatePersistsToPerConfigStateFile(t *testing.T) {
+	isolateTestCache(t)
 	cache := t.TempDir()
 	t.Setenv("HOME", cache)
 	configPath := writeConfig(t, t.TempDir(), `
@@ -299,6 +306,7 @@ processes:
 }
 
 func TestAttachSectionFoldSelectionSurvivesStateSaveFailure(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.procs = []ProcessInfo{
 		{Name: "api", Group: "hub", Status: string(StatusRunning)},
@@ -320,6 +328,7 @@ func TestAttachSectionFoldSelectionSurvivesStateSaveFailure(t *testing.T) {
 }
 
 func TestAttachMouseSelectsMembersAndFoldsSections(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.width = 100
 	am.height = 20
@@ -347,6 +356,7 @@ func TestAttachMouseSelectsMembersAndFoldsSections(t *testing.T) {
 }
 
 func TestAttachGroupHeaderActionsPostOnceToControlServer(t *testing.T) {
+	isolateTestCache(t)
 	m, cs, configPath := startControlTest(t, `
 version: 1
 processes:
@@ -425,6 +435,7 @@ processes:
 }
 
 func TestAttachPollLogsUsesSelectedMemberName(t *testing.T) {
+	isolateTestCache(t)
 	m, cs, configPath := startControlTest(t, `
 version: 1
 processes:
@@ -458,6 +469,7 @@ processes:
 }
 
 func TestAttachSnapshotRejectsOlderResponses(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	olderRequest := am.pollSnap()
 	newerRequest := am.pollSnap()
@@ -483,6 +495,7 @@ func TestAttachSnapshotRejectsOlderResponses(t *testing.T) {
 }
 
 func TestAttachLogPollsRejectDuplicateAndOutOfOrderResponses(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.procs = []ProcessInfo{{Name: "api", Status: string(StatusRunning)}}
 	if !am.selectAttachMember("api") {
@@ -533,6 +546,7 @@ func TestAttachLogPollsRejectDuplicateAndOutOfOrderResponses(t *testing.T) {
 }
 
 func TestAttachLogPollRejectsStaleErrorAfterReturningToMember(t *testing.T) {
+	isolateTestCache(t)
 	am := newAttachModel(nil, "stacker.yml")
 	am.procs = []ProcessInfo{
 		{Name: "api", Group: "hub", Status: string(StatusRunning)},
@@ -569,6 +583,7 @@ func TestAttachLogPollRejectsStaleErrorAfterReturningToMember(t *testing.T) {
 }
 
 func TestAttachFoldPersistenceReportsCachePathResolutionFailure(t *testing.T) {
+	t.Setenv("LocalAppData", "")
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
 	am := newAttachModel(nil, "stacker.yml")

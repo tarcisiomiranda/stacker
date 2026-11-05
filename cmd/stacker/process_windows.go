@@ -22,9 +22,12 @@ func shellName() string   { return "cmd" }
 func shellRunArg() string { return "/C" }
 
 func setProcGroup(cmd *exec.Cmd) {
-	// Create a new process group so we can signal the tree via taskkill /T.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+		HideWindow:    true,
+	}
+	if len(cmd.Args) == 3 && cmd.Args[1] == "/C" {
+		cmd.SysProcAttr.CmdLine = syscall.EscapeArg(cmd.Path) + " /D /S /C \"" + cmd.Args[2] + "\""
 	}
 }
 
@@ -39,6 +42,9 @@ func signalProcessGroup(pid int, sig syscall.Signal) error {
 		// 128: not found
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 128 {
 			return errProcessNotFound
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 255 && sig == signalTerm {
+			return nil
 		}
 		return fmt.Errorf("taskkill: %w (%s)", err, string(out))
 	}

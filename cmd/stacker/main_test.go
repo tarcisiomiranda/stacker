@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1091,7 +1092,7 @@ func TestRunTaskRunsInProcessCwd(t *testing.T) {
 	dir := t.TempDir()
 	p := NewProcess("api", ProcessConfig{
 		Cwd:   dir,
-		Tasks: map[string]string{"pwd": "pwd"},
+		Tasks: map[string]string{"pwd": testCommand("pwd")},
 	}, 100)
 	if err := p.RunTask("pwd", func() {}); err != nil {
 		t.Fatalf("run task: %v", err)
@@ -1655,7 +1656,7 @@ func TestErrorLinePatterns(t *testing.T) {
 }
 
 func TestStartClearsErrorCount(t *testing.T) {
-	p := NewProcess("test", ProcessConfig{Command: "true", Cwd: t.TempDir()}, 10)
+	p := NewProcess("test", ProcessConfig{Command: testCommand("true"), Cwd: t.TempDir()}, 10)
 	p.detectErrors = true
 	p.errCount = 5
 	if err := p.Start(func() {}); err != nil {
@@ -1710,7 +1711,12 @@ func TestStartFailureSetsFailedStatus(t *testing.T) {
 func TestStartInheritsUserPath(t *testing.T) {
 	dir := t.TempDir()
 	probePath := filepath.Join(dir, "stacker-path-probe")
-	if err := os.WriteFile(probePath, []byte("#!/bin/sh\necho inherited-path\n"), 0o755); err != nil {
+	probe := "#!/bin/sh\necho inherited-path\n"
+	if runtime.GOOS == "windows" {
+		probePath += ".cmd"
+		probe = "@echo off\r\necho inherited-path\r\n"
+	}
+	if err := os.WriteFile(probePath, []byte(probe), 0o755); err != nil {
 		t.Fatalf("write path probe: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1760,6 +1766,10 @@ func TestStopWaitsForProcessExit(t *testing.T) {
 }
 
 func TestStopTerminatesChildProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		testWindowsProcessTree(t)
+		return
+	}
 	dir := t.TempDir()
 	startedFile := filepath.Join(dir, "child.started")
 	stoppedFile := filepath.Join(dir, "child.stopped")
@@ -1936,6 +1946,7 @@ processes:
 
 func writeConfig(t *testing.T, dir, contents string) string {
 	t.Helper()
+	contents = testConfigCommands(contents)
 	path := filepath.Join(dir, "stacker.yml")
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

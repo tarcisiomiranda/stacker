@@ -118,7 +118,7 @@ The CLI supports `stacker start --group <name>`, `stacker stop --group <name>`, 
 - Environment variables may be placed before the command: `command: APP_ENV=development mise run api:dev`.
 - When `mise` is available in the launching user's `PATH`, use `mise run task-name` directly. Do not hardcode user-specific tool directories and do not run `mise activate` inside a process command.
 - Before generating the YAML, verify required executables with commands such as `command -v mise`. If Stacker is launched by a service manager, configure its `PATH` in that service rather than embedding a personal path in `stacker.yml`.
-- The current implementation targets Linux and macOS because it uses `sh` and Unix process groups.
+- Linux and macOS use `sh` and Unix process groups. Windows x64 uses `cmd /D /S /C`, process groups and taskkill, with a portable executable and `install.ps1` for per-user installation.
 
 ### Recommended workflow
 

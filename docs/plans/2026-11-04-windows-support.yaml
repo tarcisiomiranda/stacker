@@ -1,0 +1,50 @@
+plan: windows-support
+title: "Distribuicao Windows de stacker"
+status: done
+created: "2026-11-04"
+updated: "2026-11-05"
+goal: "Entregar stacker.exe e instalador PowerShell por usuario."
+context:
+  audit_status: done
+  steering: "Escopo reduzido pelo usuario para executaveis e instaladores; devrig apenas Docker Desktop basico; confctl sem mudancas funcionais."
+scope:
+  - "Windows x64, executavel portavel e instalador PowerShell 5.1+."
+  - "Builds, CI nativo, checksums, documentacao e testes isolados."
+out_of_scope:
+  - "MSI sem necessidade de servico, instalacao corporativa ou privilegios administrativos."
+  - "Vault do confctl, backend kube do devrig e refatoracao ampla do stacker."
+  - "Publicar releases, commit, push ou instalacao no perfil do usuario durante os testes."
+stages:
+  - id: audit
+    desc: "Auditoria de codigo e releases existente."
+    status: done
+  - id: contract
+    desc: "Ajustar o escopo solicitado e registrar os contratos Windows."
+    status: done
+  - id: implementation
+    desc: "Executavel, instalador PowerShell e fluxo de distribuicao."
+    status: done
+  - id: validation
+    desc: "Build nativo, testes do instalador, publisher e smoke do executavel."
+    status: done
+  - id: documentation
+    desc: "Documentar instalacao, limites e resultados efetivamente verificados."
+    status: done
+risks:
+  - "Docker Desktop pode nao estar instalado; distinguir testes simulados de integracao real."
+  - "Executavel em uso pode impedir atualizacao; preservar instalacao existente e retornar erro."
+rollback: "Preservar artefatos e caminhos Unix; retirar somente alteracoes desta implementacao se necessario."
+decisions:
+  - "Documentar install.ps1 por URL com Invoke-RestMethod e Invoke-Expression como equivalente Windows da instalacao por curl."
+  - "Executavel portavel mais install.ps1 atende a CLIs sem exigir MSI."
+  - "Nao ampliar suporte de vault ou Kubernetes alem do escopo autorizado."
+validation_results:
+  passed:
+    - "Oito cenarios de instalador PowerShell; latest, versao fixada, checksum invalido/ausente/duplicado, executavel bloqueado, Unicode e pacote offline."
+    - "Checks do publisher e smoke do executavel nativo."
+    - "YAML/TOML, integridade ZIP/SHA-256 e instalacao real do pacote em caminho com espacos e Unicode."
+    - "Go: suite nativa completa e go vet passaram."
+    - "Compilacao dos testes para Linux amd64 passou; execucao Unix nao realizada."
+  limitations:
+    - "GitHub Actions foi configurado, sem disparar workflow ou publicar release."
+  package: "dist/stacker-windows-amd64.zip"

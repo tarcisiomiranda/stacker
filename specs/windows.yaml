@@ -1,0 +1,33 @@
+domain: windows
+summary: "Windows executable and per-user installer"
+last_updated: "2026-11-04"
+status: implemented
+behavior:
+  - "Native x64 stacker.exe built with Go and distributed as stacker-windows-amd64.exe."
+  - "PowerShell 5.1+ installer downloads a pinned release or latest, verifies SHA-256 and installs without administrator rights."
+  - "Existing Windows process supervision is preserved and receives an isolated headless smoke test."
+  - "cmd commands preserve quoted executable paths; force-only taskkill responses proceed to the existing stop timeout and escalation."
+installer:
+  path: install.ps1
+  default_directory: "%LOCALAPPDATA%/Programs/stacker/bin"
+  parameters: [Version, InstallDir, SourceDir, ReleaseBaseUrl, NoPath]
+  offline: "package:windows creates a ZIP; SourceDir installs its checksum-verified executable without network access."
+  integrity: "Exactly one SHA-256 entry matching the selected executable is required before replacement."
+  update: "Stage in the destination filesystem and replace atomically; a failed update preserves the existing executable."
+  path_update: "Add the destination to the user and current PATH unless NoPath is selected; preserve existing entries."
+out_of_scope:
+  - "MSI packaging, Windows Service and new process-management features."
+  - "Publishing releases or installing into the user's profile during tests."
+validation:
+  - "Native build and isolated executable smoke on Windows."
+  - "Installer tests against an HTTP release fixture: latest, version, Unicode/spaces, replacement and checksum failures."
+  - "Publisher checksums require the Windows executable alongside existing Unix binaries."
+implemented:
+  - "Windows x64 executable, per-user PowerShell installer and offline ZIP generation."
+  - "Native unit suite, executable smoke, eight installer scenarios and release publisher checks passed."
+  - "Actual ZIP extraction, SHA-256 verification and offline installation into a Unicode path passed."
+pending: []
+verification:
+  host: "Windows x64, Windows PowerShell 5.1, Python 3.12.16, mise 2026.11.1."
+  go: "1.24.13"
+  unix: "Linux amd64 test binary cross-compiled successfully; not executed on this Windows host."

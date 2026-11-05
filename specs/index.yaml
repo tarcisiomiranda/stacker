@@ -1,6 +1,9 @@
-last_updated: 2026-07-20
+last_updated: "2026-11-04"
 
 domains:
+  - name: windows
+    description: Native Windows executable, PowerShell installer and distribution checks.
+    path: specs/windows.yaml
   - name: processes
     description: Process configuration, lifecycle supervision, log capture, CLI control plane, free-port, and terminal UI.
     path: specs/processes.yaml

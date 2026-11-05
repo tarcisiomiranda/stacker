@@ -225,5 +225,15 @@ class AssetValidationTests(unittest.TestCase):
                 release.collect_and_verify_assets(release_dir)
 
 
+class WindowsAssetTests(unittest.TestCase):
+    def test_windows_executable_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            release_dir = Path(temporary_directory)
+            for filename in release.EXPECTED_BINARIES - {"stacker-windows-amd64.exe"}:
+                (release_dir / filename).write_bytes(b"synthetic binary")
+            with self.assertRaisesRegex(RuntimeError, r"stacker-windows-amd64\.exe"):
+                release.collect_and_verify_assets(release_dir)
+
+
 if __name__ == "__main__":
     unittest.main()

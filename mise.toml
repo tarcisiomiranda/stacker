@@ -25,7 +25,7 @@ run = "go run ./cmd/stacker -config stacker.yml"
 [tasks.build]
 description = "Build the local binary"
 depends = ["setup"]
-run = "mkdir -p bin && go build -trimpath -ldflags=\"-s -w -X main.version=$(git describe --tags --always --dirty)\" -o bin/stacker ./cmd/stacker"
+run = "python scripts/build.py"
 
 [tasks.install]
 description = "Install Stacker into GOBIN or GOPATH/bin"
@@ -47,7 +47,20 @@ run = "rm -rf bin dist release"
 
 [tasks."release:check"]
 description = "Validate the GitHub release script"
-run = "python -m py_compile .github/scripts/release.py .github/scripts/test_release.py && python -m unittest discover -s .github/scripts -p 'test_*.py' && python .github/scripts/release.py --validate-tag v0.0.0"
+run = ["python -m unittest discover -s .github/scripts -p test_*.py", "python .github/scripts/release.py --validate-tag v0.0.0"]
+
+[tasks."test:installer:windows"]
+description = "Test the PowerShell installer against a local release fixture"
+run = "python -m unittest discover -s scripts -p test_windows_installer.py"
+
+[tasks."test:windows:smoke"]
+description = "Smoke the native Windows executable with an isolated supervisor"
+run = "python scripts/smoke_windows.py"
+
+[tasks."package:windows"]
+description = "Build a portable Windows ZIP with executable, offline installer and SHA-256"
+depends = ["build"]
+run = "python scripts/package_windows.py"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"

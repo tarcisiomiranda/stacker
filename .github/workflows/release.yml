@@ -119,9 +119,34 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows:
+    name: Build and validate Windows x64
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: "go python"
+          cache: true
+      - run: mise run test
+      - run: mise run test:installer:windows
+      - run: mise exec -- python scripts/build.py --output dist/stacker-windows-amd64.exe --version "$env:RELEASE_TAG"
+        env:
+          CGO_ENABLED: "0"
+      - run: mise exec -- python scripts/smoke_windows.py --binary dist/stacker-windows-amd64.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stacker-windows-amd64.exe
+          path: dist/stacker-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

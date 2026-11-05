@@ -55,6 +55,42 @@ curl -fsSL https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/instal
   | STACKER_INSTALL_DIR="$HOME/.local/bin" STACKER_VERSION=v0.1.0 bash
 ```
 
+## Windows x64
+
+Windows releases include `stacker-windows-amd64.exe`, a portable executable. Rename it to
+`stacker.exe` to use it directly, or install a released version with PowerShell:
+
+```powershell
+Invoke-RestMethod https://raw.githubusercontent.com/tarcisiomiranda/stacker/main/install.ps1 | Invoke-Expression
+```
+
+The installer verifies SHA-256 before replacing a binary, installs into
+`%LOCALAPPDATA%\Programs\stacker\bin`, and adds that directory to the user PATH.
+Open a new terminal after installation. Administrator access, Bash and WSL are
+not required for the CLI. PowerShell 5.1 or later is supported.
+Use `-Version vX.Y.Z` to select a release containing the Windows executable,
+`-InstallDir` to choose a directory, or `-NoPath` to leave PATH unchanged.
+A failed checksum or an executable locked by another process preserves the
+previous installation; close the process before retrying an update.
+
+From a checkout, `mise run build` produces `bin/stacker.exe`.
+`mise run test:installer:windows` tests the installer against local HTTP fixtures,
+and `mise run test:windows:smoke` checks the native executable.
+The installer downloads release assets; a locally built executable can be used
+before the first Windows release is published.
+
+`mise run package:windows` creates a ZIP containing the executable, checksum
+and installer. After extracting it, install offline with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SourceDir .
+```
+
+Windows process commands run through `cmd /D /S /C`. Prefer project tasks such as
+`mise run back:dev`, or invoke PowerShell explicitly for PowerShell syntax.
+Use `--config` with CLI control commands. The native smoke test starts and stops
+an isolated headless supervisor; Windows Service registration is not included.
+
 ## Quick start
 
 Create a `stacker.yml` next to your project:

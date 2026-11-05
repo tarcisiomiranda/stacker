@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -60,7 +61,7 @@ func TestSidebarWidthRoundTripPreservesCollapsedSections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("cache permissions = %v, want 0600", info.Mode())
 	}
 }
@@ -136,7 +137,7 @@ func TestCollapsedStateCreatesUserOnlyDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() error = %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0700 {
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0700 {
 		t.Fatalf("directory permissions = %#o, want %#o", got, 0700)
 	}
 }
