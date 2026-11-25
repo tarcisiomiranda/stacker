@@ -5,8 +5,8 @@ set -Eeuo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-REMOTE_HOST="${REMOTE_HOST:-root@192.168.29.99}"
-REMOTE_PORT="${REMOTE_PORT:-19999}"
+REMOTE_HOST="${REMOTE_HOST:-}"
+REMOTE_PORT="${REMOTE_PORT:-}"
 REMOTE_PATH="${REMOTE_PATH:-/usr/local/bin/stacker}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-10}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
@@ -16,19 +16,17 @@ usage() {
 Build and deploy Stacker to a remote machine over SSH.
 
 Usage:
-  ./scripts/deploy-remote.sh
+  REMOTE_HOST=user@server.example ./scripts/deploy-remote.sh
 
 Optional environment variables:
-  REMOTE_HOST       SSH destination (default: root@192.168.29.99)
-  REMOTE_PORT       SSH port (default: 19999)
+  REMOTE_PORT       Override the SSH port configured for REMOTE_HOST
   REMOTE_PATH       Installation path (default: /usr/local/bin/stacker)
   CONNECT_TIMEOUT   SSH connection timeout in seconds (default: 10)
   SKIP_TESTS=1      Skip mise run test
 
 Examples:
-  ./scripts/deploy-remote.sh
-  REMOTE_HOST=root@server REMOTE_PORT=22 ./scripts/deploy-remote.sh
-  REMOTE_PATH=/root/.local/bin/stacker ./scripts/deploy-remote.sh
+  REMOTE_HOST=stacker-host ./scripts/deploy-remote.sh
+  REMOTE_HOST=dev@server.example REMOTE_PORT=2222 REMOTE_PATH=/opt/bin/stacker ./scripts/deploy-remote.sh
 EOF
 }
 
@@ -37,7 +35,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 	exit 0
 fi
 
-if [[ $# -ne 0 ]]; then
+if [[ $# -ne 0 || -z "$REMOTE_HOST" ]]; then
 	usage >&2
 	exit 2
 fi
@@ -49,7 +47,7 @@ for command_name in mise ssh scp sha256sum; do
 	fi
 done
 
-if [[ ! "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
+if [[ -n "$REMOTE_PORT" && ! "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
 	printf 'REMOTE_PORT must be numeric: %s\n' "$REMOTE_PORT" >&2
 	exit 1
 fi
@@ -65,18 +63,14 @@ if [[ ! "$REMOTE_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
 fi
 
 SSH_OPTIONS=(
-	-p "$REMOTE_PORT"
 	-o BatchMode=yes
 	-o "ConnectTimeout=$CONNECT_TIMEOUT"
 	-o StrictHostKeyChecking=accept-new
 )
 
-SCP_OPTIONS=(
-	-P "$REMOTE_PORT"
-	-o BatchMode=yes
-	-o "ConnectTimeout=$CONNECT_TIMEOUT"
-	-o StrictHostKeyChecking=accept-new
-)
+if [[ -n "$REMOTE_PORT" ]]; then
+	SSH_OPTIONS+=(-o "Port=$REMOTE_PORT")
+fi
 
 printf 'Inspecting %s...\n' "$REMOTE_HOST"
 remote_info="$(
@@ -128,7 +122,7 @@ local_checksum="$(sha256sum "$build_path" | awk '{print $1}')"
 remote_upload="/tmp/stacker-upload-${local_checksum:0:12}"
 
 printf 'Uploading to %s:%s...\n' "$REMOTE_HOST" "$remote_upload"
-scp "${SCP_OPTIONS[@]}" "$build_path" "$REMOTE_HOST:$remote_upload"
+scp "${SSH_OPTIONS[@]}" "$build_path" "$REMOTE_HOST:$remote_upload"
 
 printf 'Installing as %s...\n' "$REMOTE_PATH"
 # The validated values below are intentionally expanded into remote positional arguments.

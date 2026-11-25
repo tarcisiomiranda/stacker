@@ -7,7 +7,7 @@ min_version = "2026.7.0"
 python.compile = false
 
 [tools]
-go = "1.24"
+go = "1.25"
 # 3.12 has reliable precompiled builds on linux/darwin; 3.13.x recently fell
 # through to source compile on ubuntu-latest and broke extension modules.
 python = "3.12"

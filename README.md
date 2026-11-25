@@ -14,10 +14,11 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 - **Automatic port freeing** — an optional `port:` is cleared before every start/restart, killing the whole supervisor tree (`npm → node`, `mise → uvicorn`) so restarts don't fail with "address already in use". Works on Linux, macOS, and Windows.
 - **Split log capture** — separate stdout/stderr, scrollable, with a configurable per-process memory cap.
 - **CLI control plane** — `list`/`logs`/`start`/`stop`/`restart`/`run` a running instance from scripts and agents, instead of spawning services in parallel.
+- **MCP access** — agents can read logs and control one supervisor locally without a token, or remotely over SSH or authenticated HTTPS.
 - **Logs over a pipe** — `stacker logs <name>` tails a process without a TUI, with `--since` for incremental reads and `--supervisor` for the daemon's own log.
 - **Shell completion** — bash, zsh and fish; `stacker logs <TAB>` lists the live processes with their status, so finding a log needs no memory.
 - **Serve + attach** — `stacker serve -d` runs headless in the background; `stacker attach` (or plain `stacker`) opens the TUI; `q` detaches without killing services; `stacker down` shuts everything down.
-- **Instance picker** — with several projects supervised at once, a bare `stacker` lists what is running (label, config path, ports, port collisions) and lets you pick, start the local config, or stop one. An explicit `--config` is always honoured and never swapped for another instance.
+- **Project picker** — from a parent folder, `stacker` discovers `stacker.yml` in immediate subfolders. Open one project or manage selected services across projects in the same TUI.
 - **Live YAML reload** — add, remove, or reorder processes in `stacker.yml` while Stacker is running; no restart required.
 - **On-demand web viewer** — press `w` for a browser UI on `0.0.0.0:52911` by default (reachable from other machines; override with `ui.web_host` / `ui.web_port`), in a session TUI or attached to a headless `serve`. The announced URL targets whoever holds the browser: the SSH address you connected through, or loopback on a local desktop. On SSH/headless hosts the browser is not launched; the URL is copied/shown instead.
 - **One-shot tasks** — named commands (migrations, seeds, deploys) that run once and exit, either scoped to a process or standalone.
@@ -29,7 +30,7 @@ tabs and stray `mise run` / `npm run dev` processes that leave ports bound.
 ## Requirements
 
 - Linux or macOS (Windows is supported for `free-port`; process-group signaling there is best-effort). The TUI targets Unix shells.
-- Nothing to install at runtime — the release binary is static. Building from source needs Go 1.24+.
+- The release is a standalone binary. Building from source needs Go 1.25+.
 
 ## Quick installation
 
@@ -76,8 +77,6 @@ previous installation; close the process before retrying an update.
 From a checkout, `mise run build` produces `bin/stacker.exe`.
 `mise run test:installer:windows` tests the installer against local HTTP fixtures,
 and `mise run test:windows:smoke` checks the native executable.
-The installer downloads release assets; a locally built executable can be used
-before the first Windows release is published.
 
 `mise run package:windows` creates a ZIP containing the executable, checksum
 and installer. After extracting it, install offline with:
@@ -287,7 +286,7 @@ Start the TUI once per project config. While it runs, drive it through the CLI i
 stacker -config stacker.yml     # session mode: TUI + control plane
 stacker serve                   # headless supervisor (Ctrl+C / stacker down to stop)
 stacker serve -d                # same, daemonized in the background
-stacker attach                  # TUI against a running serve instance (q detaches)
+stacker attach                  # TUI against a running instance (q detaches)
 stacker down                    # stop all processes and shut down the supervisor
 stacker ping                    # exit 0 if an instance runs for this config
 stacker list --json             # process names, status, ports, groups
@@ -342,9 +341,86 @@ explicit `Other` entries exist; `stacker __complete groups` prints the same
 candidates. With no supervisor running it completes nothing and stays silent
 rather than erroring.
 
-**Where the logs are.** Process output is kept in the supervisor's memory (bounded by `ui.max_log_lines` and `ui.max_log_bytes`), never written to disk. Three ways to read it: the TUI, the web viewer (`w`), and `stacker logs` — the only one that works over a pipe, in a script, or from an AI agent. Each `--json` reply carries a `next` index, so `--since <next>` returns only what was added since the last read; that is the incremental pattern to prefer over `-f`, which never returns. `stacker logs --supervisor` is different: it reads the daemon's own log **file**, so it answers even when the supervisor failed to start, and holds supervisor notices rather than process output. A bare `stacker` with no TTY prints the running instances plus the exact log command for each.
+**Where the logs are.** The supervisor keeps process output in memory, bounded by `ui.max_log_lines` and `ui.max_log_bytes`. Read it in the TUI, web viewer, CLI or MCP. Each `stacker logs --json` reply carries a `next` index. Pass it as `--since <next>` to continue. The `-f` flag follows output until interrupted. `stacker logs --supervisor` reads the daemon's own notices from disk and can show why a supervisor failed to start. A bare `stacker` with no TTY prints the running instances and the log command for each.
 
 **Session vs serve:** `stacker` (no subcommand) is session mode — the TUI owns the process; `q` stops everything. `stacker serve` is headless; processes keep running until `stacker down` or SIGTERM. `stacker attach` (or plain `stacker` while serve is up) opens a TUI that **detaches** on `q` without killing services.
+
+## Remote access with MCP
+
+Run the MCP command on the machine that owns the processes, under the same OS account and runtime directory as the supervisor. For example, an agent on `192.0.2.20` can edit files over SFTP and control Stacker on `192.0.2.10`. Use the absolute path of the config **on the supervisor host**. The paths, port and SSH account below are examples.
+
+Check the target on that host with `stacker --config /srv/app/stacker.yml ping`. If the project needs a supervisor, start it there with `stacker --config /srv/app/stacker.yml serve -d`. MCP works with a session TUI or a headless supervisor. Disconnecting an MCP client leaves its services running.
+
+### Local access without a token
+
+When your agent runs on the same machine and under the same OS account as Stacker, it can launch MCP over stdin/stdout. From the directory containing `stacker.yml`, register it once with Codex.
+
+```bash
+codex mcp add stacker-local -- stacker --config "$PWD/stacker.yml" mcp
+```
+
+For clients that take a URL, run this command on the supervisor host and keep it running.
+
+```bash
+stacker --config ./stacker.yml mcp --no-auth
+```
+
+Use `http://127.0.0.1:52912/mcp` in the client. In Codex the registration command is `codex mcp add stacker-local-http --url http://127.0.0.1:52912/mcp`. Local processes with access to this port can read logs and control the configured services.
+
+To change the port or use IPv6, pass a loopback address such as `--listen 127.0.0.1:9300` or `--listen '[::1]:9300'`. A local client that requires HTTPS can also use `--tls-cert` and `--tls-key` together. For connections between machines, use SSH or the authenticated HTTPS listener below.
+
+### SSH
+
+On the machine running the agent, register the SSH command with your MCP client. This example uses Codex.
+
+```bash
+codex mcp add stacker-ssh -- ssh -T -o BatchMode=yes dev@192.0.2.10 \
+  '/usr/local/bin/stacker --config /srv/app/stacker.yml mcp'
+```
+
+Use your SSH account, key or agent, and verified host key. An SSH config alias can supply the hostname, user, port and identity. The account needs permission to execute the remote command. For paths with spaces, quote them inside the remote command. Other stdio MCP clients can launch the same `ssh` executable with those arguments.
+
+### HTTPS
+
+On the supervisor host, create a bearer token once. The MCP listener also needs a PEM certificate and key for the DNS name or IP the client will use.
+
+```bash
+mkdir -p ~/.config/stacker
+(umask 077 && set -C && openssl rand -hex 32 > ~/.config/stacker/mcp.token)
+```
+
+Use a certificate from your CA if you have one. For a private LAN, this example creates a self-signed certificate for the supervisor's IP in a new directory. Copy the public `cert.pem` to the agent machine over your trusted SSH connection and add it to the trust store used by the MCP client. Keep `key.pem` on the supervisor host.
+
+```bash
+(umask 077 && mkdir ~/.config/stacker/mcp-tls && cd ~/.config/stacker/mcp-tls && \
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 90 \
+  -subj '/CN=192.0.2.10' -addext 'subjectAltName=IP:192.0.2.10' \
+  -out cert.pem -keyout key.pem)
+```
+
+Start the listener with the paths to your certificate, key and token.
+
+```bash
+stacker --config /srv/app/stacker.yml mcp --listen 192.0.2.10:9443 \
+  --tls-cert ~/.config/stacker/mcp-tls/cert.pem --tls-key ~/.config/stacker/mcp-tls/key.pem \
+  --token-file ~/.config/stacker/mcp.token
+```
+
+This runs the HTTPS listener in the foreground. To keep it available across logouts, run that command under your service manager as the supervisor user. The listener reads the token and certificate at startup. Restart the MCP command after replacing either.
+
+On the agent machine, load the same token into `STACKER_MCP_TOKEN` through your credential store or a private copy of the token file. Use an address reachable from that machine over the LAN or VPN. Register the URL with a client that supports Streamable HTTP and bearer authentication.
+
+```bash
+export STACKER_MCP_TOKEN="$(cat ~/.config/stacker/mcp.token)"
+codex mcp add stacker-https --url https://192.0.2.10:9443/mcp \
+  --bearer-token-env-var STACKER_MCP_TOKEN
+```
+
+### Using the tools
+
+Ask the agent to list processes on the registered server. `stacker_list` returns the hostname, config path and the names available to `stacker_status`, `stacker_logs`, `stacker_start`, `stacker_stop` and `stacker_restart`. Each call targets that one config. Start and restart reclaim the configured port. Restart also stops the process using its graceful timeout.
+
+`stacker_logs` takes `name`, an optional `limit` (1–500, default 200), and an optional `since` index. The first call starts in the tail. Pass the returned `next` as `since` to continue. Each page keeps whole lines up to 64 KiB and includes the first line even if it exceeds that budget.
 
 ## Working on several projects at once
 
@@ -357,11 +433,14 @@ Two projects can be supervised simultaneously — instances are keyed by the abs
 | `stacker --config X` | yes | attach to X |
 | `stacker --config X` | no | **start X** — never another instance |
 | `stacker` | `./stacker.yml` running | attach to it |
-| `stacker` | not running, others alive | **picker** |
-| `stacker` | not running, nothing alive | start `./stacker.yml` |
+| `stacker` | no local config, immediate subfolders contain `stacker.yml` | **project picker**, including stopped projects |
+| `stacker` | other instances running | **picker** |
+| `stacker` | local config exists and no instances are running | start `./stacker.yml` |
 | `stacker a` | — | picker (attach never starts anything) |
 
-The picker (`↑↓` move · `enter` open · `n` start the config here · `d` stop · `r` refresh · `q` quit) shows each instance with its label, config path, mode, how many processes are up, its ports, and a warning when a port is shared. The last row (and `n`) starts `./stacker.yml` when it exists; without a local config those controls are omitted. Without a TTY it prints the same list and exits 1, so scripts and agents never hang on a prompt.
+The picker shows each project's config path, status, process count and declared ports. Press `↑↓` to select and `Enter` to open. Opening a stopped project on its own respects its YAML's `autostart` settings. Use `d` to stop a running supervisor or `r` to refresh the list. When the local config is offered, `n` starts it. Without a TTY, the picker prints the projects and their explicit `--config` commands and exits 1.
+
+When two or more subfolders have a config, choose **All projects** to see their services and standalone tasks in one sidebar, grouped by folder. Press `Enter` to start the selected entry, `s` to stop it, or `r` to restart it. Logs come from each project's own supervisor. Stacker connects to supervisors already running and starts a background supervisor when you first start an entry in a stopped project. Supervisors started this way run entries on demand, including after config reload. Press `q` to detach and leave the services running. Use `stacker --config path/to/stacker.yml down` to shut down a project's supervisor.
 
 `stacker instances` (alias `ins`, plus `--json`) is the non-interactive version.
 
@@ -400,7 +479,7 @@ Agents should:
 
 ## Agent skills (Claude Code, Codex, OpenCode, Cursor, Grok, Kiro, Hermes, BMAD, …)
 
-Stacker ships an [Agent Skills](https://agentskills.io/specification)-compatible skill so coding agents use the CLI instead of starting services in parallel.
+Stacker ships an agent skill for operating supervised services through the CLI and MCP. [Agent Skills specification](https://agentskills.io/specification)
 
 Canonical source: `skills/stacker/SKILL.md`
 
@@ -449,7 +528,7 @@ Replacing the binary does not restart anything: supervisors already running keep
 
 ## Releases
 
-`.github/workflows/release.yml` publishes releases for SemVer tags. It runs tests and `go vet`, builds CGO-disabled binaries for Linux and macOS on AMD64 and ARM64, generates `checksums.txt`, builds release notes from `releases/<tag>.yaml` (or commit messages), and attaches all artifacts to the GitHub Release.
+`.github/workflows/release.yml` publishes releases for SemVer tags. It runs tests and `go vet`, builds binaries for Linux and macOS on AMD64 and ARM64 and for Windows x64, then attaches them and `checksums.txt` to the GitHub Release. Release notes come from `releases/<tag>.yaml` or the commit messages.
 
 ```bash
 # 1. Commit release notes (optional but preferred)

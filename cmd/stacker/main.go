@@ -501,13 +501,17 @@ func (p *Process) appendLogLocked(line string) {
 // TailLogs returns lines from absolute index `from` on, plus the actual start
 // (>= from when lines were trimmed) and the next absolute index to ask for.
 func (p *Process) TailLogs(from int) (start int, lines []string, next int) {
+	return p.logPage(from, 0)
+}
+
+func (p *Process) logPage(from, limit int) (start int, lines []string, next int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	next = p.dropped + len(p.logs)
-	from = clamp(from, p.dropped, next)
-	lines = make([]string, next-from)
-	copy(lines, p.logs[from-p.dropped:])
-	return from, lines, next
+	from = clamp(from, p.dropped, p.dropped+len(p.logs))
+	page := boundedLogLines(p.logs[from-p.dropped:], limit)
+	lines = make([]string, len(page))
+	copy(lines, page)
+	return from, lines, from + len(lines)
 }
 
 // LogNext returns the next absolute log index without copying any lines.
@@ -592,32 +596,16 @@ func (p *Process) Start(notify func()) error {
 	cmd.Env = os.Environ()
 	setProcGroup(cmd)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		p.mu.Lock()
-		if p.generation == generation {
-			p.startFailedLocked(err)
-		}
-		p.mu.Unlock()
-		notify()
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		p.mu.Lock()
-		if p.generation == generation {
-			p.startFailedLocked(err)
-		}
-		p.mu.Unlock()
-		notify()
-		return err
-	}
-
 	p.mu.Lock()
 	if p.generation != generation || p.status != StatusStarting {
 		p.mu.Unlock()
 		return nil
 	}
+	stdout, stdoutWriter := io.Pipe()
+	stderr, stderrWriter := io.Pipe()
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		p.startFailedLocked(err)
 		p.mu.Unlock()
@@ -633,10 +621,23 @@ func (p *Process) Start(notify func()) error {
 	p.appendLog(fmt.Sprintf("[stacker] started pid=%d", cmd.Process.Pid))
 	notify()
 
-	go p.capture(stdout, "stdout", notify)
-	go p.capture(stderr, "stderr", notify)
+	var capture sync.WaitGroup
+	capture.Go(func() {
+		defer stdout.Close()
+		p.capture(stdout, "stdout", notify)
+	})
+	capture.Go(func() {
+		defer stderr.Close()
+		p.capture(stderr, "stderr", notify)
+	})
 	go func() {
 		err := cmd.Wait()
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
+		capture.Wait()
+		if errors.Is(err, exec.ErrWaitDelay) {
+			err = nil
+		}
 		p.mu.Lock()
 		if p.generation == generation {
 			p.cmd = nil
@@ -967,7 +968,8 @@ type model struct {
 	// this prefix.
 	numProcesses int
 	// mode is "session" (TUI owns lifecycle) or "serve" (headless daemon).
-	mode string
+	mode        string
+	manualStart bool
 	// shutdown is closed to request supervisor exit (serve or /v1/down).
 	shutdown chan struct{}
 	// attachMode is true when this TUI is a remote attach client (q detaches).
@@ -2858,9 +2860,6 @@ func main() {
 	if len(rest) > 0 {
 		os.Exit(runCLI(configPath, explicit, rest))
 	}
-	// A bare `stacker` resolves through the launch table: attach to this
-	// config's supervisor, start it, or offer a choice among live instances.
-	// It never silently adopts an instance belonging to another config.
 	os.Exit(runTUI(configPath, explicit, true))
 }
 

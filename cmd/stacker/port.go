@@ -151,8 +151,11 @@ func portInUseProbe(port int) bool {
 			return true
 		}
 	}
-	for _, network := range []string{"tcp4", "tcp6"} {
-		ln, err := net.Listen(network, net.JoinHostPort("", strconv.Itoa(port)))
+	for _, addr := range []struct{ network, host string }{
+		{"tcp4", "127.0.0.1"}, {"tcp6", "::1"},
+		{"tcp4", ""}, {"tcp6", ""},
+	} {
+		ln, err := net.Listen(addr.network, net.JoinHostPort(addr.host, strconv.Itoa(port)))
 		if err == nil {
 			ln.Close()
 			continue

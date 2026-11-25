@@ -43,7 +43,7 @@ function __stacker_positionals
 	set -l index 2
 	while test $index -le (count $tokens)
 		switch $tokens[$index]
-			case '--config' '-config' '-n' '--tail' '--lines' '--since' '--group' '-g'
+			case '--config' '-config' '-n' '--tail' '--lines' '--since' '--group' '-g' '--listen' '--tls-cert' '--tls-key' '--token-file'
 				set index (math $index + 1)
 			case '-*'
 			case '*'
@@ -133,3 +133,9 @@ complete -c stacker -n '__stacker_command_is serve' \
 	-s d -l background -d 'Daemonize the supervisor'
 complete -c stacker -n '__stacker_command_is serve' \
 	-l web -d 'Start the web log viewer too'
+
+complete -c stacker -n '__stacker_command_is mcp' -l listen -r -d 'MCP listen address'
+complete -c stacker -n '__stacker_command_is mcp' -l no-auth -d 'Serve MCP on loopback without a token'
+complete -c stacker -n '__stacker_command_is mcp' -l tls-cert -r -F -d 'PEM certificate chain'
+complete -c stacker -n '__stacker_command_is mcp' -l tls-key -r -F -d 'PEM private key'
+complete -c stacker -n '__stacker_command_is mcp' -l token-file -r -F -d 'File containing the bearer token'

@@ -29,9 +29,9 @@ func TestWebPublicBaseURLUsesLoopbackOnLocalDesktop(t *testing.T) {
 // carries "client_ip client_port server_ip server_port": the server address is
 // the one the client actually reached, so it is routable by construction.
 func TestWebPublicBaseURLUsesSSHServerAddress(t *testing.T) {
-	t.Setenv("SSH_CONNECTION", "10.1.2.3 54321 192.168.1.20 22")
-	if got := webPublicBaseURL("0.0.0.0:52911"); got != "http://192.168.1.20:52911" {
-		t.Fatalf("webPublicBaseURL = %q, want http://192.168.1.20:52911", got)
+	t.Setenv("SSH_CONNECTION", "198.51.100.30 54321 192.0.2.20 22")
+	if got := webPublicBaseURL("0.0.0.0:52911"); got != "http://192.0.2.20:52911" {
+		t.Fatalf("webPublicBaseURL = %q, want http://192.0.2.20:52911", got)
 	}
 }
 
@@ -44,11 +44,11 @@ func TestWebPublicBaseURLBracketsIPv6SSHAddress(t *testing.T) {
 
 // An explicit ui.web_host is a deliberate choice and must survive untouched.
 func TestWebPublicBaseURLKeepsExplicitBindHost(t *testing.T) {
-	t.Setenv("SSH_CONNECTION", "10.1.2.3 54321 192.168.1.20 22")
+	t.Setenv("SSH_CONNECTION", "198.51.100.30 54321 192.0.2.20 22")
 	if got := webPublicBaseURL("127.0.0.1:52911"); got != "http://127.0.0.1:52911" {
 		t.Fatalf("webPublicBaseURL = %q, want the explicit bind host", got)
 	}
-	if got := webPublicBaseURL("10.0.0.9:52911"); got != "http://10.0.0.9:52911" {
+	if got := webPublicBaseURL("192.0.2.9:52911"); got != "http://192.0.2.9:52911" {
 		t.Fatalf("webPublicBaseURL = %q, want the explicit bind host", got)
 	}
 }
@@ -56,11 +56,11 @@ func TestWebPublicBaseURLKeepsExplicitBindHost(t *testing.T) {
 func TestSSHServerAddress(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},
-		{"10.1.2.3 54321", ""},
-		{"10.1.2.3 54321 192.168.1.20 22", "192.168.1.20"},
-		{"  10.1.2.3   54321   192.168.1.20   22  ", "192.168.1.20"},
+		{"198.51.100.30 54321", ""},
+		{"198.51.100.30 54321 192.0.2.20 22", "192.0.2.20"},
+		{"  198.51.100.30   54321   192.0.2.20   22  ", "192.0.2.20"},
 		{"fe80::1 54321 2001:db8::20 22", "2001:db8::20"},
-		{"10.1.2.3 54321 not-an-ip 22", ""},
+		{"198.51.100.30 54321 not-an-ip 22", ""},
 	}
 	for _, tc := range cases {
 		if got := sshServerAddress(tc.in); got != tc.want {
@@ -84,7 +84,7 @@ processes:
 		t.Fatalf("loadConfig: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("startWebServer: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestWebLogSidebarResizeMarkupAndDarkScrollbars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws, err := startWebServer(newModel(cfg), path)
+	ws, err := startTestWebServer(newModel(cfg), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ processes:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -268,7 +268,7 @@ processes:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -326,7 +326,7 @@ processes:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestWebFreePortEndpoint(t *testing.T) {
 		"api":    {Command: "echo ok", Port: freeport},
 		"noport": {Command: "echo ok"},
 	}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestWebTaskEndpoint(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{
 		"api": {Command: "sleep 60", Cwd: dir, Tasks: map[string]string{"hello": "echo done-web"}},
 	}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestWebLogsPageRendersColorPickerAndWrapToggle(t *testing.T) {
 	m := newModel(Config{UI: UIConfig{WordWrap: true}, Processes: map[string]ProcessConfig{
 		"api": {Command: "echo ok", Color: "#38bdf8", Port: 8123, Tasks: map[string]string{"migrate": "mise run migrate"}},
 	}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestWebStandaloneTaskSidebarAndPage(t *testing.T) {
 		Tasks:     map[string]TaskConfig{"deploy": {Command: "echo deploy"}},
 		taskOrder: []string{"deploy"},
 	})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -556,7 +556,7 @@ tasks:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestWebNoGroupKeepsStandaloneTaskLayout(t *testing.T) {
 		Tasks:     map[string]TaskConfig{"deploy": {Command: "true"}},
 		taskOrder: []string{"deploy"},
 	})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestWebNoGroupKeepsStandaloneTaskLayout(t *testing.T) {
 
 func TestWebTailIncludesRawGroup(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{"api": {Command: "true", Group: "hub"}}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -746,7 +746,7 @@ tasks:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -809,7 +809,7 @@ tasks:
 
 func TestWebGroupsProcessTailRoute(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{"groups": {Command: "sleep 60"}}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -837,7 +837,7 @@ func TestWebGroupsProcessTailRoute(t *testing.T) {
 
 func TestWebGroupsProcessBodylessStartRoute(t *testing.T) {
 	m := newModel(Config{Processes: map[string]ProcessConfig{"groups": {Command: "sleep 60"}}})
-	ws, err := startWebServer(m, "stacker.yml")
+	ws, err := startTestWebServer(m, "stacker.yml")
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -880,7 +880,7 @@ processes:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -966,7 +966,7 @@ tasks:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -1027,7 +1027,7 @@ tasks:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -1084,7 +1084,7 @@ tasks:
 		t.Fatalf("load config: %v", err)
 	}
 	m := newModel(cfg)
-	ws, err := startWebServer(m, path)
+	ws, err := startTestWebServer(m, path)
 	if err != nil {
 		t.Fatalf("start web server: %v", err)
 	}
@@ -1146,6 +1146,14 @@ tasks:
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("invalid task mapping order partially changed config")
 	}
+}
+
+func startTestWebServer(m *model, config string) (*webServer, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	return serveWeb(m, config, ln), nil
 }
 
 func postWeb(t *testing.T, ws *webServer, path, body string) (int, []byte, string) {

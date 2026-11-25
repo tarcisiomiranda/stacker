@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -53,6 +54,7 @@ type controlServer struct {
 	statePath string
 	server    *http.Server
 	listener  net.Listener
+	lock      *os.File
 }
 
 var errOrphanedGroupMutation = errors.New("orphaned entries can't change groups")
@@ -99,15 +101,44 @@ func readInstanceState(configPath string) (*InstanceState, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	data, err := os.ReadFile(path)
+	st, err := loadInstanceStateFile(path)
 	if err != nil {
 		return nil, absConfig, err
 	}
-	var st InstanceState
-	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, absConfig, err
-	}
 	return &st, absConfig, nil
+}
+
+func loadInstanceStateFile(path string) (InstanceState, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return InstanceState{}, err
+	}
+	var st InstanceState
+	err = json.Unmarshal(data, &st)
+	return st, err
+}
+
+func lockInstance(path string) (*os.File, error) {
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := tryLockInstanceFile(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func removeStaleInstance(path string, stale InstanceState) {
+	lock, err := lockInstance(path)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if current, err := loadInstanceStateFile(path); err == nil && current == stale {
+		_ = os.Remove(path)
+	}
 }
 
 func processAlive(pid int) bool {
@@ -122,20 +153,23 @@ func processAlive(pid int) bool {
 }
 
 func findRunningInstance(configPath string) (*InstanceState, error) {
-	st, _, err := readInstanceState(configPath)
+	st, absConfig, err := readInstanceState(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	if st.Config != absConfig {
+		return nil, fmt.Errorf("instance state belongs to %q, expected %q", st.Config, absConfig)
+	}
 	if !processAlive(st.PID) {
 		_, path, _ := statePathFor(configPath)
-		_ = os.Remove(path)
+		removeStaleInstance(path, *st)
 		return nil, nil
 	}
 	// Confirm control plane responds.
-	if err := controlPing(st.Addr, 300*time.Millisecond); err != nil {
+	if err := controlPing(st, 300*time.Millisecond); err != nil {
 		return nil, nil
 	}
 	return st, nil
@@ -160,19 +194,15 @@ func listRunningInstances() ([]InstanceState, error) {
 			continue
 		}
 		path := filepath.Join(dir, ent.Name())
-		data, err := os.ReadFile(path)
+		st, err := loadInstanceStateFile(path)
 		if err != nil {
 			continue
 		}
-		var st InstanceState
-		if err := json.Unmarshal(data, &st); err != nil {
-			continue
-		}
 		if !processAlive(st.PID) {
-			_ = os.Remove(path)
+			removeStaleInstance(path, st)
 			continue
 		}
-		if err := controlPing(st.Addr, 300*time.Millisecond); err != nil {
+		if err := controlPing(&st, 300*time.Millisecond); err != nil {
 			continue
 		}
 		out = append(out, st)
@@ -182,24 +212,35 @@ func listRunningInstances() ([]InstanceState, error) {
 	return out, nil
 }
 
-func controlPing(addr string, timeout time.Duration) error {
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Get("http://" + addr + "/v1/ping")
-	if err != nil {
+func controlPing(st *InstanceState, timeout time.Duration) error {
+	client := clientForInstance(st, timeout)
+	var running InstanceState
+	if err := client.get("/v1/ping", &running); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ping status %d", resp.StatusCode)
+	if running.Config != st.Config || running.PID != st.PID {
+		return errors.New("supervisor identity changed")
 	}
 	return nil
 }
 
-func startControlServer(m *model, configPath string) (*controlServer, error) {
+func startControlServer(m *model, configPath string) (_ *controlServer, resultErr error) {
 	absConfig, path, err := statePathFor(configPath)
 	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	lock, err := lockInstance(path)
+	if err != nil {
+		return nil, fmt.Errorf("could not claim supervisor for %s: %w", absConfig, err)
+	}
+	defer func() {
+		if resultErr != nil {
+			_ = lock.Close()
+		}
+	}()
 	if st, err := findRunningInstance(configPath); err != nil {
 		return nil, err
 	} else if st != nil {
@@ -217,6 +258,7 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 		config:    absConfig,
 		statePath: path,
 		listener:  ln,
+		lock:      lock,
 	}
 	// The model needs its own absolute config path to tell its processes apart
 	// from another instance's. Setting it here means no caller can forget.
@@ -238,10 +280,6 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 
 	cs.server = &http.Server{Handler: mux}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		_ = ln.Close()
-		return nil, err
-	}
 	mode := m.mode
 	if mode == "" {
 		mode = "session"
@@ -258,7 +296,7 @@ func startControlServer(m *model, configPath string) (*controlServer, error) {
 		_ = ln.Close()
 		return nil, err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeStateFile(path, data); err != nil {
 		_ = ln.Close()
 		return nil, err
 	}
@@ -275,6 +313,7 @@ func (cs *controlServer) Close() {
 	defer cancel()
 	_ = cs.server.Shutdown(ctx)
 	_ = os.Remove(cs.statePath)
+	_ = cs.lock.Close()
 }
 
 func (cs *controlServer) handlePing(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +344,7 @@ func (cs *controlServer) handleProcesses(w http.ResponseWriter, r *http.Request)
 
 func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Request) {
 	// /v1/processes/{name}/{action}
-	path := strings.TrimPrefix(r.URL.Path, "/v1/processes/")
+	path := strings.TrimPrefix(r.URL.EscapedPath(), "/v1/processes/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		http.Error(w, "expected /v1/processes/{name}/{start|stop|restart|status|logs|mark|color|group|free-port}", http.StatusBadRequest)
@@ -354,7 +393,15 @@ func (cs *controlServer) handleProcessAction(w http.ResponseWriter, r *http.Requ
 			})
 			return
 		}
-		start, lines, next := p.TailLogs(from)
+		limit := 0
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			limit, err = strconv.Atoi(raw)
+			if err != nil || limit <= 0 {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "limit must be a positive integer"})
+				return
+			}
+		}
+		start, lines, next := p.logPage(from, limit)
 		writeJSON(w, map[string]any{
 			"ok": true, "from": start, "next": next, "lines": lines,
 			"process":   processInfo(p),
@@ -872,12 +919,11 @@ func newControlClientFor(configPath string, allowFallback bool) (*controlClient,
 	if st == nil {
 		return nil, nil, errNoRunningInstance(configPath)
 	}
-	return &controlClient{
-		addr: st.Addr,
-		client: &http.Client{
-			Timeout: 60 * time.Second,
-		},
-	}, st, nil
+	return clientForInstance(st, 60*time.Second), st, nil
+}
+
+func clientForInstance(st *InstanceState, timeout time.Duration) *controlClient {
+	return &controlClient{addr: st.Addr, client: &http.Client{Timeout: timeout}}
 }
 
 // errNoRunningInstance explains that no supervisor is up for this config and
@@ -964,35 +1010,37 @@ func shellQuote(s string) string {
 	return s
 }
 
-func (c *controlClient) get(path string, out any) error {
-	resp, err := c.client.Get("http://" + c.addr + path)
-	if err != nil {
-		return err
+func processActionPath(name, action string) string {
+	segment := url.PathEscape(name)
+	if name == "." || name == ".." {
+		segment = strings.ReplaceAll(name, ".", "%2E")
 	}
-	defer resp.Body.Close()
-	return decodeControlResponse(resp, out)
+	return "/v1/processes/" + segment + "/" + action
+}
+
+func (c *controlClient) get(path string, out any) error {
+	return c.request(context.Background(), http.MethodGet, path, nil, out)
 }
 
 func (c *controlClient) post(path string, body any, out any) error {
-	var (
-		req *http.Request
-		err error
-	)
+	return c.request(context.Background(), http.MethodPost, path, body, out)
+}
+
+func (c *controlClient) request(ctx context.Context, method, path string, body, out any) error {
+	var payload io.Reader
 	if body != nil {
-		data, mErr := json.Marshal(body)
-		if mErr != nil {
-			return mErr
-		}
-		req, err = http.NewRequest(http.MethodPost, "http://"+c.addr+path, strings.NewReader(string(data)))
+		data, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
+		payload = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://"+c.addr+path, payload)
+	if err != nil {
+		return err
+	}
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
-	} else {
-		req, err = http.NewRequest(http.MethodPost, "http://"+c.addr+path, nil)
-		if err != nil {
-			return err
-		}
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

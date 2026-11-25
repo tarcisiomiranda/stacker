@@ -102,12 +102,14 @@ func writeUIState(path string, state cachedUIState) error {
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	return writeStateFile(path, append(data, '\n'))
+}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+func writeStateFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".ui-state-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*")
 	if err != nil {
 		return err
 	}
@@ -119,8 +121,5 @@ func writeUIState(path string, state cachedUIState) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
-	return nil
+	return os.Rename(tmp.Name(), path)
 }

@@ -19,25 +19,30 @@ const (
 	pickerCancel pickerAction = iota
 	pickerAttach
 	pickerStart
+	pickerWorkspace
 	// pickerLogHints prints the log commands for the selected instance and
 	// exits, for when the answer wanted is a pipe, not a full-screen TUI.
 	pickerLogHints
 )
 
-// pickerEntry is one selectable row: either a live instance or the offer to
-// start the config in the working directory.
 type pickerEntry struct {
-	summary *instanceSummary
-	// start marks the "start the config here" row, which has no instance yet.
-	start      bool
-	startLabel string
-	config     string
+	summary   *instanceSummary
+	local     bool
+	workspace bool
+	config    string
+}
+
+func (entry pickerEntry) running() bool {
+	return entry.summary != nil && entry.summary.State.PID > 0
 }
 
 type pickerModel struct {
-	rows        []instanceSummary
-	localConfig string
-	selected    int
+	rows          []instanceSummary
+	localConfig   string
+	discoveryPath string
+	projects      []workspaceProject
+	selected      int
+	listOffset    int
 
 	action pickerAction
 	chosen string
@@ -53,18 +58,18 @@ func newPickerModel(rows []instanceSummary, localConfig string) *pickerModel {
 	return &pickerModel{rows: rows, localConfig: strings.TrimSpace(localConfig)}
 }
 
-// entries is the selectable list: every live instance, then the start row when
-// the working directory actually has a config to start.
 func (m *pickerModel) entries() []pickerEntry {
-	out := make([]pickerEntry, 0, len(m.rows)+1)
+	out := make([]pickerEntry, 0, len(m.rows)+2)
+	if len(m.projects) > 1 {
+		out = append(out, pickerEntry{workspace: true})
+	}
 	for i := range m.rows {
 		out = append(out, pickerEntry{summary: &m.rows[i], config: m.rows[i].State.Config})
 	}
 	if m.localConfig != "" {
 		out = append(out, pickerEntry{
-			start:      true,
-			startLabel: configLabel(m.localConfig, 1),
-			config:     m.localConfig,
+			local:  true,
+			config: m.localConfig,
 		})
 	}
 	return out
@@ -81,8 +86,25 @@ func (m *pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "stop failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.statusText = "stopped " + msg.label
-		m.rows = msg.rows
+		m.statusText = "refreshed"
+		if msg.label != "" {
+			m.statusText = "stopped " + msg.label
+		}
+		entries := m.entries()
+		var previous pickerEntry
+		if m.selected < len(entries) {
+			previous = entries[m.selected]
+		}
+		if m.discoveryPath != "" {
+			m.projects = discoverProjects(m.discoveryPath)
+		}
+		m.rows = pickerProjectRows(m.projects, msg.rows)
+		for i, entry := range m.entries() {
+			if entry.config == previous.config && entry.workspace == previous.workspace {
+				m.selected = i
+				return m, nil
+			}
+		}
 		if m.selected >= len(m.entries()) {
 			m.selected = max(0, len(m.entries())-1)
 		}
@@ -106,17 +128,20 @@ func (m *pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			entry := entries[m.selected]
-			if entry.start {
-				m.action = pickerStart
-			} else {
+			switch {
+			case entry.workspace:
+				m.action = pickerWorkspace
+			case entry.running():
 				m.action = pickerAttach
+			default:
+				m.action = pickerStart
 			}
 			m.chosen = entry.config
 			return m, tea.Quit
 		case "n":
 			// Shortcut for "start the config here" without scrolling to the last row.
 			for i, entry := range entries {
-				if entry.start {
+				if entry.local {
 					m.selected = i
 					m.action = pickerStart
 					m.chosen = entry.config
@@ -130,8 +155,8 @@ func (m *pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			entry := entries[m.selected]
-			if entry.start {
-				m.statusText = "nothing running for that config yet — start it first"
+			if !entry.running() {
+				m.statusText = "Select a running project for log commands"
 				return m, nil
 			}
 			m.action = pickerLogHints
@@ -143,7 +168,7 @@ func (m *pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			entry := entries[m.selected]
-			if entry.start {
+			if !entry.running() {
 				return m, nil
 			}
 			m.statusText = "stopping " + entry.summary.Label + "…"
@@ -211,7 +236,11 @@ var (
 
 func (m *pickerModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Stacker — running instances"))
+	title := "Stacker — running instances"
+	if m.discoveryPath != "" {
+		title = "Stacker — choose a project"
+	}
+	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n\n")
 
 	entries := m.entries()
@@ -220,37 +249,51 @@ func (m *pickerModel) View() string {
 		b.WriteString("\n")
 	}
 
-	for i, entry := range entries {
+	visible := len(entries)
+	if m.height > 0 {
+		visible = min(visible, max(1, (m.height-7)/5))
+	}
+	m.listOffset = sidebarSelectionOffset(m.listOffset, m.selected, len(entries), visible)
+	for i := m.listOffset; i < m.listOffset+visible; i++ {
+		entry := entries[i]
 		cursor := "  "
 		if i == m.selected {
 			cursor = "❯ "
 		}
-		if entry.start {
-			line := cursor + "+ start the config here"
+		if entry.local || entry.workspace {
+			title, detail := "+ start the config here", entry.config
+			if entry.workspace {
+				title, detail = "All projects", "Choose services from the projects in this folder"
+			}
+			line := cursor + title
 			if i == m.selected {
 				line = selectedProcessStyle.Render(line)
 			}
 			b.WriteString(line)
 			b.WriteString("\n")
-			b.WriteString("    " + pickerDimStyle.Render(entry.config))
+			b.WriteString("    " + pickerDimStyle.Render(sanitizeLogLine(detail)))
 			b.WriteString("\n\n")
 			continue
 		}
 
 		row := entry.summary
-		head := fmt.Sprintf("%s%s", cursor, row.Label)
+		head := cursor + sanitizeLogLine(row.Label)
 		if i == m.selected {
 			head = selectedProcessStyle.Render(head)
 		}
 		b.WriteString(head)
 		b.WriteString("  ")
-		b.WriteString(pickerDimStyle.Render(orDefault(row.State.Mode, "session")))
+		mode := "stopped"
+		if entry.running() {
+			mode = orDefault(row.State.Mode, "session")
+		}
+		b.WriteString(pickerDimStyle.Render(mode))
 		b.WriteString("\n")
-		b.WriteString("    " + pickerDimStyle.Render(row.State.Config))
+		b.WriteString("    " + pickerDimStyle.Render(sanitizeLogLine(row.State.Config)))
 		b.WriteString("\n")
 
 		if row.Err != "" {
-			b.WriteString("    " + failedStyle.Render("unreachable: "+row.Err))
+			b.WriteString("    " + failedStyle.Render(sanitizeLogLine(row.Err)))
 			b.WriteString("\n\n")
 			continue
 		}
@@ -273,32 +316,19 @@ func (m *pickerModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	// Say where logs are: the TUI has them, but nothing on this screen used to
-	// hint at that, and a user who wants to pipe them needs the CLI form.
-	b.WriteString(pickerDimStyle.Render("enter opens the TUI with live logs · l prints log commands to pipe"))
-	b.WriteString("\n\n")
+	if len(entries) > visible {
+		fmt.Fprintf(&b, "%d/%d\n", m.selected+1, len(entries))
+	}
 
 	footer := []string{
 		keycap("↑↓") + " move",
 		keycap("enter") + " open",
 		keycap("l") + " logs",
-		keycap("n") + " start here",
-		keycap("d") + " stop",
-		keycap("r") + " refresh",
-		keycap("q") + " quit",
 	}
-	if m.localConfig == "" {
-		// No local config row: omit the start shortcut so the footer does not
-		// advertise an action that always fails.
-		footer = []string{
-			keycap("↑↓") + " move",
-			keycap("enter") + " open",
-			keycap("l") + " logs",
-			keycap("d") + " stop",
-			keycap("r") + " refresh",
-			keycap("q") + " quit",
-		}
+	if m.localConfig != "" {
+		footer = append(footer, keycap("n")+" start here")
 	}
+	footer = append(footer, keycap("d")+" stop", keycap("r")+" refresh", keycap("q")+" quit")
 	b.WriteString(strings.Join(footer, mutedStyle.Render(" · ")))
 
 	out := b.String()
@@ -308,26 +338,23 @@ func (m *pickerModel) View() string {
 	return out
 }
 
-// runPicker lets the user choose among live instances. Without a TTY it prints
-// the same information and fails, so agents and scripts never block on a prompt
-// they cannot answer.
-func runPicker(configPath string, rows []instanceSummary) int {
-	local := ""
-	if configExists(configPath) {
-		if abs, _, err := instanceID(configPath); err == nil {
-			local = abs
-		} else {
-			local = configPath
-		}
-	}
-
+func runPicker(configPath, local string, projects []workspaceProject, rows []instanceSummary) int {
+	choices := pickerProjectRows(projects, rows)
 	if !stdoutIsTerminal() {
-		fmt.Fprint(os.Stderr, formatInstanceList(rows, local))
+		if len(projects) > 0 {
+			fmt.Fprint(os.Stderr, formatProjectChoices(choices[:len(projects)]))
+		}
+		if len(choices) > len(projects) || len(projects) == 0 {
+			fmt.Fprint(os.Stderr, formatInstanceList(choices[len(projects):], local))
+		}
 		fmt.Fprintln(os.Stderr, "\nPass --config to choose one without a terminal.")
 		return 1
 	}
 
-	m := newPickerModel(rows, local)
+	m := newPickerModel(choices, local)
+	if len(projects) > 0 {
+		m.discoveryPath, m.projects = configPath, projects
+	}
 	program := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "picker error:", err)
@@ -337,13 +364,71 @@ func runPicker(configPath string, rows []instanceSummary) int {
 	case pickerAttach:
 		return runAttach(m.chosen)
 	case pickerStart:
-		return runSession(m.chosen)
+		return runTUI(m.chosen, true, true)
+	case pickerWorkspace:
+		return runWorkspace(configPath, m.projects)
 	case pickerLogHints:
 		fmt.Print(formatLogHints(m.chosenRow))
 		return 0
 	default:
 		return 0
 	}
+}
+
+func pickerProjectRows(projects []workspaceProject, running []instanceSummary) []instanceSummary {
+	if len(projects) == 0 {
+		return running
+	}
+	byConfig := make(map[string]instanceSummary, len(running))
+	for _, row := range running {
+		byConfig[row.State.Config] = row
+	}
+	rows := make([]instanceSummary, 0, len(projects)+len(running))
+	for _, project := range projects {
+		row, found := byConfig[project.config]
+		if found {
+			delete(byConfig, project.config)
+		} else {
+			row.State.Config = project.config
+			procs, err := project.configuredProcesses()
+			if err != nil {
+				row.Err = err.Error()
+			} else {
+				row.setProcesses(procs)
+			}
+		}
+		row.Label = project.name
+		rows = append(rows, row)
+	}
+	for _, row := range running {
+		if _, found := byConfig[row.State.Config]; found {
+			rows = append(rows, row)
+		}
+	}
+	markCollisions(rows)
+	return rows
+}
+
+func formatProjectChoices(rows []instanceSummary) string {
+	var b strings.Builder
+	b.WriteString("Stacker projects in this directory:\n")
+	for _, row := range rows {
+		status := "stopped"
+		if row.State.PID > 0 {
+			status = "running, " + orDefault(row.State.Mode, "session")
+		}
+		fmt.Fprintf(&b, "  %s (%s)\n    stacker --config %s\n", sanitizeLogLine(row.Label), status, shellQuote(row.State.Config))
+		if row.State.PID > 0 {
+			fmt.Fprintf(&b, "    stacker --config %s logs %s\n", shellQuote(row.State.Config), shellQuote(orDefault(row.Sample, "<process>")))
+		}
+		if row.Err != "" {
+			fmt.Fprintf(&b, "    %s\n", sanitizeLogLine(row.Err))
+		}
+		if len(row.Collide) > 0 {
+			fmt.Fprintf(&b, "    shared ports: %s\n", joinInts(row.Collide))
+		}
+	}
+	return b.String()
 }
 
 func configExists(path string) bool {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,20 +11,22 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// runAttach opens a TUI against a running serve instance. q detaches only.
 func runAttach(configPath string) int {
 	client, st, err := newControlClient(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if st.Mode != "" && st.Mode != "serve" {
-		fmt.Fprintf(os.Stderr, "instance is in %q mode; attach is only for serve\n", st.Mode)
-		fmt.Fprintln(os.Stderr, "session mode already has a TUI — use that terminal, or stacker down first")
-		return 1
-	}
+	return runAttachProgram(newAttachModel(client, st.Config))
+}
 
-	m := newAttachModel(client, st.Config)
+func runWorkspace(configPath string, projects []workspaceProject) int {
+	m := newAttachModel(nil, configPath)
+	m.workspace = &workspaceView{projects: projects}
+	return runAttachProgram(m)
+}
+
+func runAttachProgram(m *attachModel) int {
 	program := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "attach error:", err)
@@ -46,6 +47,7 @@ type attachLogsMsg struct {
 	name       string
 	lines      []string
 	next       int
+	instance   InstanceState
 	err        error
 }
 type attachStatusMsg string
@@ -55,12 +57,14 @@ type attachStatusMsg string
 // browser can reach.
 type attachWebMsg struct {
 	addr    string
+	name    string
 	enabled bool
 	err     error
 }
 
 type attachModel struct {
 	client           *controlClient
+	workspace        *workspaceView
 	configPath       string
 	collapsedPath    string
 	collapsedPathErr error
@@ -71,6 +75,7 @@ type attachModel struct {
 	listOffset          int
 	hasSnapshot         bool
 	snapshotSeq         uint64
+	snapshotInFlight    bool
 	selectionGeneration uint64
 	logRequestSeq       uint64
 	logInFlightSeq      uint64
@@ -78,6 +83,7 @@ type attachModel struct {
 	logs                []string
 	logNext             int
 	logName             string
+	logInstance         InstanceState
 
 	width, height         int
 	preferredSidebarWidth int
@@ -121,22 +127,53 @@ func (m *attachModel) tick() tea.Cmd {
 }
 
 func (m *attachModel) pollSnap() tea.Cmd {
+	workspace := m.workspace
+	if workspace != nil && m.snapshotInFlight {
+		return nil
+	}
+	m.snapshotInFlight = true
 	m.snapshotSeq++
 	seq := m.snapshotSeq
+	client := m.client
 	return func() tea.Msg {
-		var resp struct {
-			OK        bool          `json:"ok"`
-			Error     string        `json:"error"`
-			Processes []ProcessInfo `json:"processes"`
+		if workspace != nil {
+			procs, err := workspace.snapshot()
+			return attachSnapMsg{seq: seq, procs: procs, err: err}
 		}
-		if err := m.client.get("/v1/processes", &resp); err != nil {
-			return attachSnapMsg{seq: seq, err: err}
-		}
-		if !resp.OK && resp.Error != "" {
-			return attachSnapMsg{seq: seq, err: fmt.Errorf("%s", resp.Error)}
-		}
-		return attachSnapMsg{seq: seq, procs: resp.Processes}
+		procs, err := readProcessInfos(client)
+		return attachSnapMsg{seq: seq, procs: procs, err: err}
 	}
+}
+
+type attachTarget struct {
+	client  *controlClient
+	project workspaceProject
+	name    string
+}
+
+func (m *attachModel) target() attachTarget {
+	current := m.current()
+	if m.workspace == nil {
+		target := attachTarget{client: m.client}
+		if current != nil {
+			target.name = current.Name
+		}
+		return target
+	}
+	if current != nil {
+		return attachTarget{project: m.workspace.projectFor(current.Group), name: workspaceProcessName(current.Name)}
+	}
+	if section := m.selectedSection(); section != nil {
+		return attachTarget{project: m.workspace.projectFor(section.Name)}
+	}
+	return attachTarget{}
+}
+
+func (target attachTarget) connect(start bool, timeout time.Duration) (*controlClient, InstanceState, error) {
+	if target.project.config != "" {
+		return target.project.connect(start, timeout)
+	}
+	return target.client, InstanceState{}, nil
 }
 
 func (m *attachModel) pollLogs() tea.Cmd {
@@ -153,21 +190,32 @@ func (m *attachModel) pollLogs() tea.Cmd {
 	if m.logName != name {
 		from = 0
 	}
+	target, previous := m.target(), m.logInstance
 	return func() tea.Msg {
-		path := "/v1/processes/" + url.PathEscape(name) + "/logs?from=" + fmt.Sprintf("%d", from)
+		result := attachLogsMsg{seq: seq, generation: generation, name: name}
+		client, instance, err := target.connect(false, 2*time.Second)
+		result.instance, result.err = instance, err
+		if err != nil || client == nil {
+			return result
+		}
+		start := from
+		if instance != previous {
+			start = 0
+		}
+		path := processActionPath(target.name, "logs") + fmt.Sprintf("?from=%d", start)
 		var resp struct {
 			OK    bool     `json:"ok"`
 			Error string   `json:"error"`
 			Lines []string `json:"lines"`
 			Next  int      `json:"next"`
 		}
-		if err := m.client.get(path, &resp); err != nil {
-			return attachLogsMsg{seq: seq, generation: generation, name: name, err: err}
+		if err := client.get(path, &resp); err != nil {
+			result.err = err
+		} else if !resp.OK && resp.Error != "" {
+			result.err = fmt.Errorf("%s", resp.Error)
 		}
-		if !resp.OK && resp.Error != "" {
-			return attachLogsMsg{seq: seq, generation: generation, name: name, err: fmt.Errorf("%s", resp.Error)}
-		}
-		return attachLogsMsg{seq: seq, generation: generation, name: name, lines: resp.Lines, next: resp.Next}
+		result.lines, result.next = resp.Lines, resp.Next
+		return result
 	}
 }
 
@@ -210,7 +258,11 @@ func (m *attachModel) members() []sectionMember {
 }
 
 func (m *attachModel) sections() []section {
-	return buildSections(m.members())
+	members := m.members()
+	if m.workspace != nil {
+		return m.workspace.sections(members)
+	}
+	return buildSections(members)
 }
 
 func (m *attachModel) rows() []listRow {
@@ -387,17 +439,23 @@ func (m *attachModel) toggleSection(current *section) {
 }
 
 func (m *attachModel) postAction(action string) tea.Cmd {
-	name := m.currentName()
-	if name == "" {
+	target := m.target()
+	if target.name == "" {
 		return nil
 	}
 	return func() tea.Msg {
-		path := "/v1/processes/" + url.PathEscape(name) + "/" + action
+		client, _, err := target.connect(action == "start" || action == "restart", 60*time.Second)
+		if err != nil {
+			return attachStatusMsg(err.Error())
+		}
+		if client == nil {
+			return attachStatusMsg("Project is stopped")
+		}
 		var resp struct {
 			OK    bool   `json:"ok"`
 			Error string `json:"error"`
 		}
-		if err := m.client.post(path, nil, &resp); err != nil {
+		if err := client.post(processActionPath(target.name, action), nil, &resp); err != nil {
 			if resp.Error != "" {
 				return attachStatusMsg(resp.Error)
 			}
@@ -408,6 +466,15 @@ func (m *attachModel) postAction(action string) tea.Cmd {
 }
 
 func (m *attachModel) groupActionCmd(group, action string) tea.Cmd {
+	if m.workspace != nil {
+		if action == "start" {
+			m.toggleSection(m.selectedSection())
+			m.resetLogs()
+		} else {
+			m.statusText = "Select a service or task"
+		}
+		return nil
+	}
 	effectiveGroup := strings.TrimSpace(group)
 	if effectiveGroup == "Other" {
 		effectiveGroup = ""
@@ -432,20 +499,48 @@ func (m *attachModel) groupActionCmd(group, action string) tea.Cmd {
 // A POST with no body means "toggle", so the client never has to track state
 // that the supervisor already owns.
 func (m *attachModel) toggleWebCmd() tea.Cmd {
+	target := m.target()
 	return func() tea.Msg {
+		client, _, err := target.connect(false, 60*time.Second)
+		if err != nil {
+			return attachWebMsg{err: err}
+		}
+		if client == nil {
+			return attachWebMsg{err: fmt.Errorf("project is stopped")}
+		}
 		var resp struct {
 			OK      bool   `json:"ok"`
 			Error   string `json:"error"`
 			Enabled bool   `json:"enabled"`
 			Addr    string `json:"addr"`
 		}
-		if err := m.client.post("/v1/web", nil, &resp); err != nil {
+		if err := client.post("/v1/web", nil, &resp); err != nil {
 			if resp.Error != "" {
 				return attachWebMsg{err: fmt.Errorf("%s", resp.Error)}
 			}
 			return attachWebMsg{err: err}
 		}
-		return attachWebMsg{addr: resp.Addr, enabled: resp.Enabled}
+		return attachWebMsg{addr: resp.Addr, enabled: resp.Enabled, name: target.name}
+	}
+}
+
+func (m *attachModel) markProjectCmd() tea.Cmd {
+	target := m.target()
+	return func() tea.Msg {
+		client, _, err := target.connect(false, 60*time.Second)
+		if err != nil {
+			return attachStatusMsg(err.Error())
+		}
+		if client == nil {
+			return attachStatusMsg("Project is stopped")
+		}
+		var resp struct {
+			Marked int `json:"marked"`
+		}
+		if err := client.post("/v1/mark-all", nil, &resp); err != nil {
+			return attachStatusMsg(err.Error())
+		}
+		return attachStatusMsg(fmt.Sprintf("Marked %d running", resp.Marked))
 	}
 }
 
@@ -472,8 +567,8 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusText = "Web logs stopped"
 		default:
 			target := webPublicBaseURL(msg.addr) + "/"
-			if name := m.currentName(); name != "" {
-				target = webLogsURL(msg.addr, name)
+			if msg.name != "" {
+				target = webLogsURL(msg.addr, msg.name)
 			}
 			m.statusText = "Web logs: " + target
 			return m, m.copyWebURLCmd(target)
@@ -484,11 +579,14 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.snapshotSeq {
 			return m, nil
 		}
+		m.snapshotInFlight = false
+		m.pollErr = ""
 		if msg.err != nil {
 			m.pollErr = msg.err.Error()
-			return m, nil
+			if msg.procs == nil {
+				return m, nil
+			}
 		}
-		m.pollErr = ""
 		firstSnapshot := !m.hasSnapshot
 		prev, prevHeader := "", false
 		if !firstSnapshot {
@@ -496,7 +594,7 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.procs = msg.procs
 		m.hasSnapshot = true
-		if len(m.procs) == 0 {
+		if len(m.procs) == 0 && m.workspace == nil {
 			m.selected = -1
 			m.resetLogs()
 			return m, nil
@@ -522,10 +620,11 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pollErr = msg.err.Error()
 			return m, nil
 		}
-		if m.logName != msg.name {
+		if m.logName != msg.name || m.logInstance != msg.instance {
 			m.logs = nil
 			m.logNext = 0
 			m.logName = msg.name
+			m.logInstance = msg.instance
 			m.logOffset = 0
 		}
 		if len(msg.lines) > 0 {
@@ -593,17 +692,7 @@ func (m *attachModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.postAction("mark")
 		case "m":
-			return m, func() tea.Msg {
-				var resp struct {
-					OK     bool   `json:"ok"`
-					Error  string `json:"error"`
-					Marked int    `json:"marked"`
-				}
-				if err := m.client.post("/v1/mark-all", nil, &resp); err != nil {
-					return attachStatusMsg(err.Error())
-				}
-				return attachStatusMsg(fmt.Sprintf("Marked %d running", resp.Marked))
-			}
+			return m, m.markProjectCmd()
 		case "w":
 			return m, m.toggleWebCmd()
 		case "W":
@@ -687,6 +776,7 @@ func (m *attachModel) resetLogs() {
 	m.logs = nil
 	m.logNext = 0
 	m.logName = ""
+	m.logInstance = InstanceState{}
 	m.logOffset = 0
 	m.follow = true
 }
@@ -696,6 +786,9 @@ func (m *attachModel) visibleLines() int {
 }
 
 func (m *attachModel) leftWidth() int {
+	if m.workspace != nil {
+		return clampSidebarWidth(m.width, m.preferredSidebarWidth, clamp(m.width/3, 32, 48))
+	}
 	w := m.width / 3
 	if w < 18 {
 		w = 18
@@ -745,7 +838,7 @@ func (m *attachModel) View() string {
 		footer = m.statusText + "  " + footer
 	}
 	if m.pollErr != "" {
-		footer = failedStyle.Render(m.pollErr) + "  " + footer
+		footer = failedStyle.Render(strings.ReplaceAll(m.pollErr, "\n", " · ")) + "  " + footer
 	}
 	return body + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
 }
@@ -759,21 +852,30 @@ func (m *attachModel) footerView() string {
 		keycap("q") + " detach",
 		keycap("?") + " help",
 	}
-	return mutedStyle.Render("attach") + " · " + strings.Join(parts, mutedStyle.Render(" · "))
+	mode := "attach"
+	if m.workspace != nil {
+		mode = "projects"
+		parts = []string{keycap("enter") + " start", keycap("s") + " stop", keycap("r") + " restart", keycap("q") + " detach", keycap("?") + " help"}
+	}
+	return mutedStyle.Render(mode) + " · " + strings.Join(parts, mutedStyle.Render(" · "))
 }
 
 func (m *attachModel) helpView() string {
+	start, mark, mode := "start", "mark all running", "Attach"
+	if m.workspace != nil {
+		start, mark, mode = "start selected entry or fold project", "mark running entries in selected project", "All projects"
+	}
 	rows := [][2]string{
 		{"↑/k ↓/j", "select process"},
 		{"wheel", "scroll process list under mouse"},
 		{"[/]", "resize process sidebar (or drag divider)"},
 		{"←/h →/l", "fold section"},
-		{"enter", "start"},
+		{"enter", start},
 		{"s", "stop"},
 		{"r", "restart"},
 		{"f", "free port"},
 		{"space", "mark selected"},
-		{"m", "mark all running"},
+		{"m", mark},
 		{"w", "toggle web logs (copies the URL)"},
 		{"W", "toggle word wrap"},
 		{"pgup/pgdn", "page logs"},
@@ -781,7 +883,7 @@ func (m *attachModel) helpView() string {
 		{"q", "detach (leave serve running)"},
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Attach — keyboard"))
+	b.WriteString(titleStyle.Render(mode + " — keyboard"))
 	b.WriteString("\n\n")
 	for _, row := range rows {
 		b.WriteString(keycap(row[0]))
@@ -797,8 +899,12 @@ func (m *attachModel) helpView() string {
 
 func (m *attachModel) processList() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Processes"))
-	b.WriteString(mutedStyle.Render(" · attached"))
+	if m.workspace != nil {
+		b.WriteString(titleStyle.Render("Projects"))
+	} else {
+		b.WriteString(titleStyle.Render("Processes"))
+		b.WriteString(mutedStyle.Render(" · attached"))
+	}
 	b.WriteString("\n")
 	rows := m.rows()
 	visibleRows := sidebarVisibleRows(m.height, len(rows))
@@ -839,6 +945,9 @@ func (m *attachModel) processList() string {
 			kind = "failed"
 		}
 		name := sanitizeLogLine(p.Name)
+		if m.workspace != nil {
+			name = sanitizeLogLine(workspaceProcessName(p.Name))
+		}
 		if p.Orphaned {
 			name += " ⚠"
 		}
@@ -871,7 +980,7 @@ func (m *attachModel) logView() string {
 		title = "logs"
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(truncate(title, max(10, m.width-m.leftWidth()-8))))
+	b.WriteString(titleStyle.Render(truncate(sanitizeLogLine(title), max(10, m.width-m.leftWidth()-8))))
 	b.WriteString("\n")
 	if currentSection != nil {
 		summary := m.summarizeSection(currentSection)

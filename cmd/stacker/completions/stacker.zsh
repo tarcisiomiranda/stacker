@@ -43,7 +43,7 @@ _stacker() {
 				(( index++ ))
 				;;
 			--config=*) _stacker_config=${word#--config=} ;;
-			-n|--tail|--lines|--since|--group|-g) (( index++ )) ;;
+			-n|--tail|--lines|--since|--group|-g|--listen|--tls-cert|--tls-key|--token-file) (( index++ )) ;;
 			-*) ;;
 			*) positional+=("$word") ;;
 		esac
@@ -53,11 +53,11 @@ _stacker() {
 
 	# Value-taking flags: complete the value.
 	case ${words[CURRENT - 1]} in
-		--config|-config)
+		--config|-config|--tls-cert|--tls-key|--token-file)
 			_files
 			return
 			;;
-		-n|--tail|--lines|--since)
+		-n|--tail|--lines|--since|--listen)
 			return
 			;;
 		--group|-g)

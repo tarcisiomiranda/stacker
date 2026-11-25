@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -14,9 +15,28 @@ import (
 // background re-execs into a daemon child; withWeb starts the log viewer.
 func runServe(configPath string, background, withWeb bool) int {
 	if background && os.Getenv("STACKER_DAEMON_CHILD") != "1" {
-		return daemonizeServe(configPath, withWeb)
+		st, started, err := startServeDaemon(configPath, withWeb, false)
+		if err != nil {
+			logPath := daemonLogPath(configPath)
+			fmt.Fprintln(os.Stderr, "stacker serve failed to start:", err)
+			if tail := tailFile(logPath, 12); tail != "" {
+				fmt.Fprintln(os.Stderr, "--- log ---")
+				fmt.Fprint(os.Stderr, tail)
+			}
+			fmt.Fprintf(os.Stderr, "log file: %s\n", logPath)
+			return 1
+		}
+		if started {
+			printServeStarted(configPath, st.PID, daemonLogPath(configPath))
+		} else {
+			printServeAlreadyRunning(configPath, st)
+		}
+		return 0
 	}
+	return runSupervisor(configPath, withWeb, false)
+}
 
+func runSupervisor(configPath string, withWeb, manual bool) int {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config error:", err)
@@ -25,6 +45,7 @@ func runServe(configPath string, background, withWeb bool) int {
 
 	m := newModel(cfg)
 	m.mode = "serve"
+	m.manualStart = manual
 	if notice := otherInstancesNotice(configPath, cfg); notice != "" {
 		fmt.Fprintln(os.Stderr, "notice:", notice)
 	}
@@ -41,9 +62,8 @@ func runServe(configPath string, background, withWeb bool) int {
 	m.startConfigWatcher()
 	defer m.stopConfigWatcher()
 
-	// Autostart processes (same as TUI Init).
 	for _, p := range m.processes {
-		if p.Config.Autostart && p.Unavailable() == "" {
+		if !manual && p.Config.Autostart && p.Unavailable() == "" {
 			go func(proc *Process) { _ = proc.Start(m.notify) }(p)
 		}
 	}
@@ -84,6 +104,7 @@ func runServe(configPath string, background, withWeb bool) int {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	select {
 	case <-sigCh:
@@ -93,6 +114,73 @@ func runServe(configPath string, background, withWeb bool) int {
 	m.stopWeb()
 	m.stopAll()
 	return 0
+}
+
+func startServeDaemon(configPath string, withWeb, manual bool) (*InstanceState, bool, error) {
+	if st, err := findRunningInstance(configPath); err != nil || st != nil {
+		return st, false, err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, false, err
+	}
+	command := "serve"
+	if manual {
+		command = "__serve-manual"
+	}
+	args := []string{"--config", configPath, command}
+	if withWeb {
+		args = append(args, "--web")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "STACKER_DAEMON_CHILD=1")
+	cmd.SysProcAttr = detachedProcessAttrs()
+
+	logPath := daemonLogPath(configPath)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return nil, false, err
+	}
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	cmd.Stdout, cmd.Stderr = log, log
+	err = cmd.Start()
+	_ = log.Close()
+	if err != nil {
+		return nil, false, err
+	}
+
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	st, err := waitServeReady(configPath, cmd.Process.Pid, exited)
+	return st, st != nil && st.PID == cmd.Process.Pid, err
+}
+
+func waitServeReady(configPath string, pid int, exited <-chan error) (*InstanceState, error) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		if st, err := findRunningInstance(configPath); err == nil && st != nil {
+			return st, nil
+		}
+		select {
+		case err := <-exited:
+			if st, findErr := findRunningInstance(configPath); findErr == nil && st != nil {
+				return st, nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("background process (pid %d): %w", pid, err)
+			}
+			return nil, fmt.Errorf("background process exited (pid %d)", pid)
+		case <-timeout.C:
+			return nil, fmt.Errorf("timed out waiting for control plane (pid %d)", pid)
+		case <-ticker.C:
+		}
+	}
 }
 
 func daemonLogPath(configPath string) string {

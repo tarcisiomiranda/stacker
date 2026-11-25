@@ -160,7 +160,7 @@ processes:
 	}
 	m := newModel(cfg)
 	m.processes[0].appendLog("[stdout] hello web")
-	ws, err := startWebServer(m, cfgPath)
+	ws, err := startTestWebServer(m, cfgPath)
 	if err != nil {
 		t.Fatalf("startWebServer: %v", err)
 	}

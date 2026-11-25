@@ -45,7 +45,7 @@ _stacker_complete() {
 			((index++))
 			;;
 		--config=*) _stacker_config="${words#--config=}" ;;
-		-n | --tail | --lines | --since | --group | -g) ((index++)) ;;
+		-n | --tail | --lines | --since | --group | -g | --listen | --tls-cert | --tls-key | --token-file) ((index++)) ;;
 		-*) ;;
 		*) positional+=("$words") ;;
 		esac
@@ -59,11 +59,11 @@ _stacker_complete() {
 
 	# A flag that takes a value: complete the value, not another flag.
 	case "$previous" in
-	--config | -config)
+	--config | -config | --tls-cert | --tls-key | --token-file)
 		mapfile -t COMPREPLY < <(compgen -f -- "$current")
 		return 0
 		;;
-	-n | --tail | --lines | --since)
+	-n | --tail | --lines | --since | --listen)
 		return 0
 		;;
 	--group | -g)

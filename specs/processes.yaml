@@ -1,4 +1,4 @@
-last_updated: 2026-09-29
+last_updated: 2026-11-24
 
 domain: processes
 description: Process configuration, lifecycle supervision, grouped terminal UI and web index/log sidebar with horizontal group-header dividers and `−/+` fold markers, implicit `Other` fallback, first-appearance ordering within service/task tiers, scrollable session/attach process lists that keep selection visible, persisted section folding and sidebar width in session/attach, session-only dual log comparison with independently adjustable stacked and side-by-side pane proportions, focus, scroll, wrap, auto-scroll pause and selection, session group picking with full-choice navigation and digit shortcuts, web log viewer resizable sidebar and dark thin scrollbars, group-aware mixed service/task ordering, web and control-plane actions (group action results list affected members under `affected`), log capture, CLI control plane, free-port, live YAML reload, serve/attach, and instance disambiguation.
@@ -26,6 +26,14 @@ models:
     path: cmd/stacker/logs.go
   - name: logsResponse
     path: cmd/stacker/logs.go
+  - name: mcpProcessList
+    path: cmd/stacker/mcp.go
+  - name: mcpProcessInput
+    path: cmd/stacker/mcp.go
+  - name: mcpLogsInput
+    path: cmd/stacker/mcp.go
+  - name: mcpProcessResult
+    path: cmd/stacker/mcp.go
   - name: completionShells
     path: cmd/stacker/completion.go
   - name: ProcessStatus
@@ -83,6 +91,9 @@ graphql:
 
 rest:
   endpoints:
+    - name: Streamable HTTP /mcp
+      path: cmd/stacker/mcp_http.go
+      description: Remote HTTPS requires a bearer token. The --no-auth option binds only to loopback and defaults to http://127.0.0.1:52912/mcp. Both modes share stacker_list, stacker_status, stacker_logs, stacker_start, stacker_stop and stacker_restart with local and SSH stdio. Each server addresses one config.
     - name: GET /v1/ping
       path: cmd/stacker/control.go
     - name: GET /v1/processes
@@ -91,6 +102,7 @@ rest:
       path: cmd/stacker/control.go
     - name: GET /v1/processes/{name}/logs
       path: cmd/stacker/control.go
+      description: Optional positive limit pages whole lines from the requested index. The next index advances by the number of lines delivered.
     - name: POST /v1/processes/{name}/start
       path: cmd/stacker/control.go
     - name: POST /v1/processes/{name}/stop
@@ -182,8 +194,10 @@ frontend:
       path: cmd/stacker/main.go
     - name: Grouped attach TUI list and folding
       path: cmd/stacker/attach.go
-    - name: Instance picker TUI
+    - name: Project picker TUI with immediate subfolder discovery
       path: cmd/stacker/picker.go
+    - name: All projects TUI with per-project logs and on-demand startup
+      path: cmd/stacker/workspace.go
     - name: Grouped web sidebar and fold state
       path: cmd/stacker/web.go
     - name: Web log viewer resizable sidebar and dark scrollbar

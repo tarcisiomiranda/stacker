@@ -66,11 +66,27 @@ func runTUI(configPath string, explicit, canStart bool) int {
 	}
 	target, others := splitInstances(all, configPath)
 
-	switch mode, used := resolveLaunch(configPath, explicit, canStart, target, others); mode {
+	mode, used := resolveLaunch(configPath, explicit, canStart, target, others)
+	var projects []workspaceProject
+	var localConfig string
+	if !explicit && canStart && target == nil {
+		if configExists(configPath) {
+			localConfig = configPath
+			if abs, _, err := instanceID(configPath); err == nil {
+				localConfig = abs
+			}
+		} else {
+			projects = discoverProjects(configPath)
+			if len(projects) > 0 {
+				mode = launchPicker
+			}
+		}
+	}
+	switch mode {
 	case launchAttach:
 		return runAttach(used)
 	case launchPicker:
-		return runPicker(configPath, collectInstanceSummaries(others))
+		return runPicker(configPath, localConfig, projects, collectInstanceSummaries(others))
 	case launchNoInstance:
 		fmt.Fprintln(os.Stderr, errNoRunningInstance(configPath))
 		return 1

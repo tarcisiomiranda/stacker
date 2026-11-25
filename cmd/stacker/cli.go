@@ -18,6 +18,10 @@ func runCLI(configPath string, explicit bool, args []string) int {
 			continue
 		}
 		if a == "-h" || a == "--help" || a == "help" {
+			if len(filtered) > 0 && filtered[0] == "mcp" {
+				printMCPHelp(os.Stdout)
+				return 0
+			}
 			printCLIHelp()
 			return 0
 		}
@@ -39,6 +43,10 @@ func runCLI(configPath string, explicit bool, args []string) int {
 			fmt.Printf("stacker %s\n", resolveVersion())
 		}
 		return 0
+	case "mcp":
+		return cliMCP(configPath, explicit, rest)
+	case "__serve-manual":
+		return runSupervisor(configPath, false, true)
 	case "serve":
 		background, withWeb := false, false
 		for _, a := range rest {
@@ -120,13 +128,14 @@ func printCLIHelp() {
 	fmt.Print(`Stacker CLI — control a running Stacker instance
 
 Usage:
-  stacker                                  Attach to this config, or choose among running instances
+  stacker                                  Open this config or choose from nearby projects and running instances
   stacker --config path                    Start that config (or attach if it already runs)
   stacker [--config path] <command> [args] Talk to a running instance
 
 Commands:
   serve [-d] [--web]   Headless supervisor (background with -d)
-  attach, a            Attach TUI to a running serve instance
+  mcp                  Serve MCP over stdio, SSH, loopback HTTP or HTTPS (mcp --help)
+  attach, a            Attach TUI to a running instance
   down                 Stop all processes and shut down the supervisor
   ping                 Check if Stacker is running for this config
   list                 List configured processes and their status
@@ -374,8 +383,7 @@ func cliStatus(configPath, name string, jsonOut bool) int {
 		Error   string      `json:"error"`
 		Process ProcessInfo `json:"process"`
 	}
-	path := "/v1/processes/" + name + "/status"
-	// status accepts GET
+	path := processActionPath(name, "status")
 	if err := client.get(path, &resp); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -407,7 +415,7 @@ func cliAction(configPath, name, action string, jsonOut bool) int {
 		Error   string      `json:"error"`
 		Process ProcessInfo `json:"process"`
 	}
-	path := "/v1/processes/" + name + "/" + action
+	path := processActionPath(name, action)
 	if err := client.post(path, nil, &resp); err != nil {
 		// Prefer body error when present
 		if resp.Error != "" {

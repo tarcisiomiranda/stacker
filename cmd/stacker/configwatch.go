@@ -179,7 +179,7 @@ func (m *model) applyConfigDiff(cfg Config) {
 			p.Disable(reason)
 		}
 		yamlProcs = append(yamlProcs, p)
-		if pc.Autostart && reason == "" {
+		if !m.manualStart && pc.Autostart && reason == "" {
 			toAutostart = append(toAutostart, p)
 		}
 	}

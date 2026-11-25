@@ -1,0 +1,22 @@
+tag: v0.17.0
+previous: v0.16.0
+
+highlights: |
+  Connect an MCP client to a Stacker supervisor to read logs and control
+  services, including when the editor and supervisor run on different machines.
+  Open Stacker in a parent folder to work with several projects in one TUI.
+  Windows x64 joins the Linux and macOS release downloads.
+
+features:
+  - "List processes, check status, page through logs, and start, stop or restart services through MCP. Each connection targets an explicit config."
+  - "Use local stdio or a loopback URL without a token. Connect remotely over SSH or HTTPS with a TLS certificate and bearer token."
+  - "Discover projects in immediate subfolders. The All projects view groups services by folder and can start a stopped project's supervisor on demand."
+  - "Install the Windows x64 executable with PowerShell and verify it against the release checksums."
+
+fixes:
+  - "Detect a busy loopback port on macOS even when the listener does not accept a probe connection."
+
+changes:
+  - "The Stacker agent skill includes connection examples for local and remote MCP clients."
+  - "Source builds require Go 1.25 or later."
+  - "The SSH deployment script now takes its destination from REMOTE_HOST and uses the host's SSH port unless REMOTE_PORT is set."

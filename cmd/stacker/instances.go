@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,45 +77,54 @@ func collectInstanceSummaries(all []InstanceState) []instanceSummary {
 	rows := make([]instanceSummary, 0, len(all))
 	for i, st := range all {
 		row := instanceSummary{State: st, Label: labels[i]}
-		client := &controlClient{
-			addr:   st.Addr,
-			client: &http.Client{Timeout: 2 * time.Second},
-		}
-		var resp struct {
-			OK        bool          `json:"ok"`
-			Processes []ProcessInfo `json:"processes"`
-		}
-		if err := client.get("/v1/processes", &resp); err != nil {
+		procs, err := readProcessInfos(clientForInstance(&st, 2*time.Second))
+		if err != nil {
 			row.Err = err.Error()
-			rows = append(rows, row)
-			continue
+		} else {
+			row.setProcesses(procs)
 		}
-		firstName, firstRunning := "", ""
-		for _, pi := range resp.Processes {
-			// One-shot tasks are not services; counting them would make the
-			// "n/total up" ratio meaningless.
-			if pi.OneShot {
-				continue
-			}
-			row.Total++
-			if firstName == "" {
-				firstName = pi.Name
-			}
-			if pi.Status == string(StatusRunning) {
-				row.Up++
-				if firstRunning == "" {
-					firstRunning = pi.Name
-				}
-			}
-			if pi.Port > 0 {
-				row.Ports = append(row.Ports, pi.Port)
-			}
-		}
-		row.Sample = orDefault(firstRunning, firstName)
 		rows = append(rows, row)
 	}
 	markCollisions(rows)
 	return rows
+}
+
+func readProcessInfos(client *controlClient) ([]ProcessInfo, error) {
+	var resp struct {
+		OK        bool          `json:"ok"`
+		Error     string        `json:"error"`
+		Processes []ProcessInfo `json:"processes"`
+	}
+	if err := client.get("/v1/processes", &resp); err != nil {
+		return nil, err
+	}
+	if !resp.OK && resp.Error != "" {
+		return nil, fmt.Errorf("%s", resp.Error)
+	}
+	return resp.Processes, nil
+}
+
+func (row *instanceSummary) setProcesses(procs []ProcessInfo) {
+	firstName, firstRunning := "", ""
+	for _, process := range procs {
+		if process.OneShot {
+			continue
+		}
+		row.Total++
+		if firstName == "" {
+			firstName = process.Name
+		}
+		if process.Status == string(StatusRunning) {
+			row.Up++
+			if firstRunning == "" {
+				firstRunning = process.Name
+			}
+		}
+		if process.Port > 0 {
+			row.Ports = append(row.Ports, process.Port)
+		}
+	}
+	row.Sample = orDefault(firstRunning, firstName)
 }
 
 // markCollisions flags ports declared by more than one instance — the setup

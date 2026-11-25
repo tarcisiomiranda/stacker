@@ -58,7 +58,15 @@ try {
     } else {
         Invoke-WebRequest -UseBasicParsing -Uri "$downloadUrl/$asset" -OutFile $stagedBinary
     }
-    $actual = (Get-FileHash -LiteralPath $stagedBinary -Algorithm SHA256).Hash
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($stagedBinary)
+        $actual = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $sha256.Dispose()
+    }
     if ($actual -ne $entries[0].Groups[1].Value) {
         throw "SHA-256 mismatch for $asset; the previous installation was preserved."
     }

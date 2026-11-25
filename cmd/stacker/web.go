@@ -53,6 +53,10 @@ func startWebServer(m *model, config string) (*webServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	return serveWeb(m, config, ln), nil
+}
+
+func serveWeb(m *model, config string, ln net.Listener) *webServer {
 	ws := &webServer{m: m, config: config, listener: ln}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", ws.handleIndex)
@@ -60,7 +64,7 @@ func startWebServer(m *model, config string) (*webServer, error) {
 	mux.HandleFunc("/api/", ws.handleAction)
 	ws.server = &http.Server{Handler: mux}
 	go func() { _ = ws.server.Serve(ln) }()
-	return ws, nil
+	return ws
 }
 
 // startWeb starts the web viewer unless one is already running, returning its

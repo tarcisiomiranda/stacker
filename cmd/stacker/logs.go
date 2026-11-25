@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -128,7 +129,7 @@ func cliLogs(configPath string, args []string, jsonOut bool) int {
 		return 2
 	}
 
-	from, err := logStartIndex(client, opts)
+	from, err := logStartIndex(context.Background(), client, opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -150,7 +151,7 @@ func cliLogs(configPath string, args []string, jsonOut bool) int {
 
 // logStartIndex resolves where to begin: an explicit --since, the tail window,
 // or the very beginning.
-func logStartIndex(client *controlClient, opts logsOptions) (int, error) {
+func logStartIndex(ctx context.Context, client *controlClient, opts logsOptions) (int, error) {
 	if opts.since >= 0 {
 		return opts.since, nil
 	}
@@ -159,7 +160,7 @@ func logStartIndex(client *controlClient, opts logsOptions) (int, error) {
 	}
 	// Ask how long the log is, then request only the last N lines. TailLogs
 	// clamps a start index that has already been trimmed, so this is safe.
-	resp, err := fetchLogs(client, opts.name, 0, true)
+	resp, err := fetchLogs(ctx, client, opts.name, 0, 0, true)
 	if err != nil {
 		return 0, err
 	}
@@ -168,20 +169,38 @@ func logStartIndex(client *controlClient, opts logsOptions) (int, error) {
 
 type logsResponse struct {
 	OK      bool        `json:"ok"`
-	Error   string      `json:"error"`
+	Error   string      `json:"error,omitempty"`
 	From    int         `json:"from"`
 	Next    int         `json:"next"`
 	Lines   []string    `json:"lines"`
 	Process ProcessInfo `json:"process"`
 }
 
-func fetchLogs(client *controlClient, name string, from int, nolines bool) (logsResponse, error) {
+func boundedLogLines(lines []string, limit int) []string {
+	if limit <= 0 {
+		return lines
+	}
+	lines = lines[:min(limit, len(lines))]
+	bytesLeft := 64 * 1024
+	for i, line := range lines {
+		if i > 0 && len(line) > bytesLeft {
+			return lines[:i]
+		}
+		bytesLeft -= len(line)
+	}
+	return lines
+}
+
+func fetchLogs(ctx context.Context, client *controlClient, name string, from, limit int, nolines bool) (logsResponse, error) {
 	var resp logsResponse
-	path := "/v1/processes/" + url.PathEscape(name) + "/logs?from=" + strconv.Itoa(from)
+	path := processActionPath(name, "logs") + "?from=" + strconv.Itoa(from)
 	if nolines {
 		path += "&nolines=1"
 	}
-	if err := client.get(path, &resp); err != nil {
+	if limit > 0 {
+		path += "&limit=" + strconv.Itoa(limit)
+	}
+	if err := client.request(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		if resp.Error != "" {
 			return resp, fmt.Errorf("%s", resp.Error)
 		}
@@ -190,12 +209,19 @@ func fetchLogs(client *controlClient, name string, from int, nolines bool) (logs
 	if !resp.OK {
 		return resp, fmt.Errorf("%s", orDefault(resp.Error, "log request failed"))
 	}
+	if resp.Process.Name != name {
+		return resp, fmt.Errorf("expected process %q, supervisor returned %q", name, resp.Process.Name)
+	}
+	if limit > 0 {
+		resp.Lines = boundedLogLines(resp.Lines, limit)
+		resp.Next = resp.From + len(resp.Lines)
+	}
 	return resp, nil
 }
 
 // printLogBatch writes one batch and returns the index to resume from.
 func printLogBatch(client *controlClient, opts logsOptions, from int) (int, int) {
-	resp, err := fetchLogs(client, opts.name, from, false)
+	resp, err := fetchLogs(context.Background(), client, opts.name, from, 0, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return from, 1

@@ -132,13 +132,13 @@ The CLI supports `stacker start --group <name>`, `stacker stop --group <name>`, 
 
 ### CLI (control plane)
 
-While a Stacker instance is running for a given config, AI agents and scripts should use the CLI instead of starting services in parallel:
+While a Stacker instance is running for a given config, agents can control it through its CLI or its registered MCP server.
 
 ```bash
 stacker -config stacker.yml              # session: TUI + control plane
 stacker serve                            # headless supervisor
 stacker serve -d                         # daemonize headless supervisor
-stacker attach                           # TUI attach to serve (q detaches)
+stacker attach                           # TUI attach to a running instance (q detaches)
 stacker down                             # stop all processes + supervisor
 stacker ping                             # is an instance running?
 stacker list --json                      # process names and status
@@ -160,11 +160,13 @@ stacker version                          # print binary version (-v, --version)
 
 **Shell completion.** `stacker completion <bash|zsh|fish>` prints the script; the scripts are embedded in the binary, so they always match its commands. `mise run build:install` installs them for every shell it detects, into directories those shells already load (Homebrew's `site-functions` / `bash_completion.d` when present, `~/.local/share/...` otherwise), never editing an rc file. Candidates are dynamic: the scripts call the hidden `stacker __complete <processes|tasks|commands|flags|shells>`, which prints `value<TAB>description` lines — so `stacker logs <TAB>` lists the live processes with their status, and zsh/fish show that status beside each name. `__complete` prints nothing and exits 0 on any failure, because a TAB press must not error or block. Agents can use `__complete processes` as a jq-free way to list names with status.
 
-**Reading logs.** Process output lives in the supervisor's memory (capped by `ui.max_log_lines` and `ui.max_log_bytes`), not on disk. `stacker logs <name>` is how a script or an agent reads it — the TUI and web viewer are for humans. Each `--json` response carries a `next` index; pass it back as `--since <next>` to get only the lines added since the previous read, which is the incremental pattern to use instead of `-f`. `stacker logs --supervisor` reads the daemon's own log file directly and therefore still works when the supervisor is dead or never started; it holds supervisor notices, not process output. A bare `stacker` with no TTY prints the running instances together with the log command for each, so an agent that lands there has a next step instead of a dead end.
+**Reading logs.** The supervisor keeps process output in memory up to `ui.max_log_lines` and `ui.max_log_bytes`. Agents read it with `stacker logs <name>` or the MCP tool `stacker_logs`. Each CLI `--json` response carries a `next` index. Pass it as `--since <next>` to poll for new output. MCP accepts the same index as `since`. The daemon writes its own notices to disk, so `stacker logs --supervisor` can diagnose a supervisor that failed to start. A bare `stacker` with no TTY prints the running instances and a log command for each.
 
 Only one instance is allowed per absolute config path (`session` or `serve`). The control plane listens on `127.0.0.1` and writes a state file under `$XDG_RUNTIME_DIR/stacker/` (or the user cache dir). Edits to `stacker.yml` while running are hot-reloaded (add/remove/reorder); running processes removed from YAML stay until stopped.
 
 ### Which instance a command talks to
+
+A registered Stacker MCP server targets one explicit `--config` on the supervisor host. When editing over SFTP, call `stacker_list` on the intended MCP server to confirm the remote config path and process names. Use `stacker_status`, `stacker_logs`, `stacker_start`, `stacker_stop` and `stacker_restart` on that same server. Pass the log response's `next` as `since` for the next page. An offline supervisor returns a tool error and can rejoin when it starts. Local clients can launch `stacker --config PATH mcp` over stdio or connect to `http://127.0.0.1:52912/mcp` while `stacker --config PATH mcp --no-auth` is running. The token-free listener accepts only loopback bind addresses. For remote clients, use SSH or HTTPS with a bearer token. [MCP connection examples](README.md#remote-access-with-mcp)
 
 **Agents must always pass `--config`.** An explicit `--config` is honoured unconditionally: a config that exists on disk is never swapped for another running instance. Without it, resolution is:
 
@@ -173,10 +175,13 @@ Only one instance is allowed per absolute config path (`session` or `serve`). Th
 | `stacker --config X` | yes | attach to X |
 | `stacker --config X` | no | start X (session mode), never another instance |
 | `stacker` | `./stacker.yml` running | attach to it |
-| `stacker` | not running, other instances alive | interactive picker (no TTY: prints the list, exits 1) |
-| `stacker` | not running, nothing alive | start `./stacker.yml` |
+| `stacker` | no local config, immediate subfolders contain `stacker.yml` | project picker, including stopped projects (no TTY: prints the list, exits 1) |
+| `stacker` | other instances running | interactive picker |
+| `stacker` | local config exists and no instances are running | start `./stacker.yml` |
 | `stacker a --config X` | no | error — attach never starts anything |
 | `stacker a` | — | interactive picker |
+
+For two or more discovered projects, **All projects** groups the services and standalone tasks by folder. `Enter` starts the selected entry through its project's supervisor. A supervisor started from this view runs entries on demand during startup and reload. `q` detaches and leaves the supervisors running.
 
 For subcommands, adopting a different instance depends on whether the command mutates state:
 
